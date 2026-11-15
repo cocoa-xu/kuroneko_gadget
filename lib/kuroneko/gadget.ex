@@ -313,9 +313,9 @@ defmodule Kuroneko.Gadget do
   #=> {:ok,
   #=>  %{
   #=>    interface: "usb0",
-  #=>    device_address: "ea:52:ab:b6:67:a7",
+  #=>    device_address: "9e:9f:51:11:f7:b2",
   #=>    host_address: "02:12:34:56:78:9a",
-  #=>    default_addresses: %{device_address: "ea:52:ab:b6:67:a7", host_address: "2e:53:95:27:a5:9d"}
+  #=>    default_addresses: %{device_address: "9e:9f:51:11:f7:b2", host_address: "7a:78:1f:1f:1d:dd"}
   #=>  }}
   ```
 

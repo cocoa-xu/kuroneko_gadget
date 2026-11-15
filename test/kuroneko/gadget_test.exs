@@ -346,8 +346,8 @@ defmodule Kuroneko.GadgetTest do
   end
 
   describe "the network" do
-    @device "ea:52:ab:b6:67:a7"
-    @host "2e:53:95:27:a5:9d"
+    @device "9e:9f:51:11:f7:b2"
+    @host "7a:78:1f:1f:1d:dd"
 
     # As the NanoKVM-Go system leaves it, with the KVM functions linked after.
     setup %{gadget: gadget} do
