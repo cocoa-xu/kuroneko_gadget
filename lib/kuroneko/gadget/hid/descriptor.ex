@@ -1,6 +1,7 @@
 defmodule Kuroneko.Gadget.HID.Descriptor do
   @moduledoc false
-  # The HID functions Kuroneko.Gadget creates. The reports are Kuroneko.Gadget.HID.Report.
+  # The HID functions Kuroneko.Gadget creates. The reports are
+  # Kuroneko.Gadget.HID.Report.
 
   @type t() :: %{
           protocol: 0..2,

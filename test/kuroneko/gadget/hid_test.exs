@@ -1,6 +1,7 @@
 defmodule Kuroneko.Gadget.HIDTest do
   use ExUnit.Case, async: true
 
+  alias Kuroneko.Gadget.FakeConfigfs
   alias Kuroneko.Gadget.HID
   alias Kuroneko.Gadget.HID.Descriptor
 
@@ -9,7 +10,7 @@ defmodule Kuroneko.Gadget.HIDTest do
   setup %{tmp_dir: tmp_dir} do
     [keyboard, mouse, relative] = devices = Enum.map(0..2, &Path.join(tmp_dir, "hidg#{&1}"))
     Enum.each(devices, &File.write!(&1, ""))
-    %{gadget: gadget, udc_class: udc_class} = Kuroneko.Gadget.FakeConfigfs.gadget(tmp_dir)
+    %{gadget: gadget, udc_class: udc_class} = FakeConfigfs.gadget(tmp_dir)
     opts = [keyboard: keyboard, mouse: mouse, relative_mouse: relative, gadget: gadget]
     pid = start_supervised!({HID, opts ++ [udc_class: udc_class, name: nil]})
 

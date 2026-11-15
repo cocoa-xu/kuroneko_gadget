@@ -7,6 +7,9 @@ defmodule Kuroneko.GadgetTest do
 
   @moduletag :tmp_dir
 
+  # A device controller with small FIFOs, as the NanoKVM-Go's.
+  @small_fifos %{microphone: 832, speaker: 682}
+
   setup %{tmp_dir: tmp_dir}, do: FakeConfigfs.gadget(tmp_dir)
 
   test "adds the functions and binds the gadget again", %{gadget: gadget, udc_class: udc_class} do
@@ -112,13 +115,51 @@ defmodule Kuroneko.GadgetTest do
     File.write!(Path.join(dir, "c_alt0_name"), "Playback Inactive\n")
     File.write!(Path.join(dir, "int_ep_present"), "1\n")
 
+    File.write!(Path.join(dir, "function_name"), "Source/Sink\n")
+
     start_supervised!(
-      {Kuroneko.Gadget, functions: [:speaker], gadget: gadget, udc_class: udc_class, name: nil}
+      {Kuroneko.Gadget,
+       functions: [:speaker],
+       names: [speaker: "Kuroneko Speaker", microphone: "Kuroneko Microphone"],
+       gadget: gadget,
+       udc_class: udc_class,
+       name: nil}
     )
 
-    assert FakeConfigfs.read(gadget, "functions/uac2.audio/c_alt0_name") == "NanoKVM-Go Speaker"
+    assert FakeConfigfs.read(gadget, "functions/uac2.audio/c_alt0_name") == "Kuroneko Speaker"
     assert FakeConfigfs.read(gadget, "functions/uac2.audio/int_ep_present") == "0"
+    # The kernel's name for what is not named.
+    assert FakeConfigfs.read(gadget, "functions/uac2.audio/function_name") == "Source/Sink\n"
     refute File.exists?(Path.join(dir, "p_alt0_name"))
+  end
+
+  test "names the drive", %{gadget: gadget, udc_class: udc_class} do
+    start_supervised!(
+      {Kuroneko.Gadget,
+       functions: [:storage],
+       names: [storage: {"Kuroneko", "Virtual Media", "0100"}],
+       gadget: gadget,
+       udc_class: udc_class,
+       name: nil}
+    )
+
+    assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.0/inquiry_string") ==
+             "KuronekoVirtual Media   0100"
+  end
+
+  test "leaves the drive's name to the kernel", %{gadget: gadget, udc_class: udc_class} do
+    start_supervised!(
+      {Kuroneko.Gadget, functions: [:storage], gadget: gadget, udc_class: udc_class, name: nil}
+    )
+
+    refute File.exists?(Path.join(gadget, "functions/mass_storage.disk/lun.0/inquiry_string"))
+  end
+
+  test "refuses names that are not text", %{gadget: gadget} do
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {%ArgumentError{}, _stack}} =
+             Kuroneko.Gadget.start_link(names: [storage: "Kuroneko"], gadget: gadget, name: nil)
   end
 
   test "a microphone alone leaves the speaker direction out", %{
@@ -168,7 +209,11 @@ defmodule Kuroneko.GadgetTest do
   end
 
   test "sets up the formats of the audio directions", %{gadget: gadget, udc_class: udc_class} do
-    pid = start_supervised!({Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, name: nil})
+    pid =
+      start_supervised!(
+        {Kuroneko.Gadget,
+         max_packet: @small_fifos, gadget: gadget, udc_class: udc_class, name: nil}
+      )
 
     assert :ok =
              Kuroneko.Gadget.configure(pid, [
@@ -192,6 +237,17 @@ defmodule Kuroneko.GadgetTest do
              microphone: %{channels: 1, rates: [48_000, 44_100, 96_000], sample_bits: 24},
              speaker: %{channels: 2, rates: [192_000], sample_bits: 32}
            }
+  end
+
+  test "takes packets as large as high speed carries by default", %{
+    gadget: gadget,
+    udc_class: udc_class
+  } do
+    pid = start_supervised!({Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, name: nil})
+
+    # 97 frames of 8 bytes each 500 µs fit 1024 bytes.
+    assert :ok = Kuroneko.Gadget.configure(pid, [{:speaker, rates: [192_000], sample_bits: 32}])
+    assert FakeConfigfs.read(gadget, "functions/uac2.audio/c_hs_bint") == "3"
   end
 
   test "leaves the audio function alone in the same format", %{
@@ -233,9 +289,10 @@ defmodule Kuroneko.GadgetTest do
 
     # 7.1 of 24 bits at 192 kHz: 25 frames of 24 bytes each 125 µs fit 682.
     assert :ok =
-             Kuroneko.Gadget.validate([
-               {:speaker, channels: 8, rates: [192_000], sample_bits: 24}
-             ])
+             Kuroneko.Gadget.validate(
+               [{:speaker, channels: 8, rates: [192_000], sample_bits: 24}],
+               max_packet: @small_fifos
+             )
 
     assert :ok = configure.({:speaker, channels: 2, rates: [384_000], sample_bits: 32})
 
@@ -289,7 +346,6 @@ defmodule Kuroneko.GadgetTest do
   end
 
   describe "the network" do
-    @serial "6a1a78455040f186"
     @device "ea:52:ab:b6:67:a7"
     @host "2e:53:95:27:a5:9d"
 
@@ -300,7 +356,6 @@ defmodule Kuroneko.GadgetTest do
       File.write!(Path.join(ncm, "host_addr"), @host <> "\0\n")
       File.write!(Path.join(ncm, "ifname"), "usb0\n")
       File.write!(Path.join(ncm, "qmult"), "5\n")
-      Process.register(self(), Kuroneko.Gadget.FakeKV)
       %{ncm: ncm}
     end
 
@@ -311,14 +366,23 @@ defmodule Kuroneko.GadgetTest do
             functions: [:keyboard, :storage],
             gadget: context.gadget,
             udc_class: context.udc_class,
-            serial_number: @serial,
-            kv: Kuroneko.Gadget.FakeKV,
+            network: [
+              default_addresses: %{device_address: @device, host_address: @host},
+              persist: keeper(self())
+            ],
             name: nil
           ],
           opts
         )
 
       start_supervised!({Kuroneko.Gadget, opts}, id: make_ref())
+    end
+
+    defp keeper(test, result \\ :ok) do
+      fn kept ->
+        send(test, {:kept, kept})
+        result
+      end
     end
 
     test "tells the addresses and those by default", context do
@@ -336,7 +400,7 @@ defmodule Kuroneko.GadgetTest do
       File.write!(Path.join(context.ncm, "ifname"), "(unnamed net_device)\n")
       assert {:ok, %{interface: nil}} = Kuroneko.Gadget.network(pid)
 
-      pid = start_usb(context, serial_number: nil)
+      pid = start_usb(context, network: [])
       assert {:ok, %{default_addresses: nil}} = Kuroneko.Gadget.network(pid)
 
       assert Kuroneko.Gadget.set_network_addresses(pid, host_address: :default) ==
@@ -352,7 +416,7 @@ defmodule Kuroneko.GadgetTest do
       assert FakeConfigfs.read(context.gadget, "functions/ncm.usb0/host_addr") ==
                "02:12:34:56:78:9a"
 
-      # The NanoKVM's interface stays: the function is the same.
+      # The device's interface stays: the function is the same.
       assert FakeConfigfs.read(context.gadget, "functions/ncm.usb0/ifname") == "usb0\n"
       assert FakeConfigfs.read(context.gadget, "UDC") == "udc.0"
 
@@ -361,11 +425,11 @@ defmodule Kuroneko.GadgetTest do
                  Path.join(context.gadget, "functions/#{function}")
       end
 
-      assert_received {Kuroneko.Gadget.FakeKV, %{"usbnet_hostaddr" => "02:12:34:56:78:9a"} = put}
-      refute Map.has_key?(put, "usbnet_devaddr")
+      assert_received {:kept, %{host_address: "02:12:34:56:78:9a"} = kept}
+      refute Map.has_key?(kept, :device_address)
     end
 
-    test "gives the NanoKVM's end another address with a new function", context do
+    test "gives the device's end another address with a new function", context do
       # configfs takes the attributes away with the function.
       rmdir = fn dir ->
         File.rm_rf!(dir)
@@ -388,8 +452,7 @@ defmodule Kuroneko.GadgetTest do
       refute File.exists?(Path.join(context.gadget, "functions/ncm.usb0/ifname"))
       assert File.exists?(Path.join(context.gadget, "configs/c.1/ncm.usb0"))
 
-      assert_received {Kuroneko.Gadget.FakeKV,
-                       %{"usbnet_devaddr" => "06:aa:bb:cc:dd:ee", "usbnet_hostaddr" => ""}}
+      assert_received {:kept, %{device_address: "06:aa:bb:cc:dd:ee", host_address: :default}}
     end
 
     test "keeps the addresses that are there", context do
@@ -404,11 +467,10 @@ defmodule Kuroneko.GadgetTest do
 
       assert FakeConfigfs.read(context.gadget, "UDC") == "untouched"
 
-      assert_received {Kuroneko.Gadget.FakeKV,
-                       %{"usbnet_devaddr" => "", "usbnet_hostaddr" => @host}}
+      assert_received {:kept, %{device_address: :default, host_address: @host}}
 
       assert :ok = Kuroneko.Gadget.set_network_addresses(pid, host_address: @host, persist: false)
-      refute_received {Kuroneko.Gadget.FakeKV, _put}
+      refute_received {:kept, _kept}
     end
 
     test "refuses what is not a unicast address of its own", context do
@@ -443,7 +505,23 @@ defmodule Kuroneko.GadgetTest do
                Kuroneko.Gadget.set_network_addresses(pid, host_address: @device)
 
       assert FakeConfigfs.read(context.gadget, "UDC") == "untouched"
-      refute_received {Kuroneko.Gadget.FakeKV, _put}
+      refute_received {:kept, _kept}
+    end
+
+    test "tells when the addresses are not kept", context do
+      pid = start_usb(context, network: [persist: keeper(self(), {:error, :read_only})])
+
+      assert Kuroneko.Gadget.set_network_addresses(pid, host_address: "02:12:34:56:78:9a") ==
+               {:error, {:not_kept, :read_only}}
+
+      assert_received {:kept, %{host_address: "02:12:34:56:78:9a"}}
+
+      assert FakeConfigfs.read(context.gadget, "functions/ncm.usb0/host_addr") ==
+               "02:12:34:56:78:9a"
+
+      pid = start_usb(context, network: [])
+      assert :ok = Kuroneko.Gadget.set_network_addresses(pid, host_address: @host)
+      refute_received {:kept, _kept}
     end
 
     @tag capture_log: true
@@ -462,7 +540,7 @@ defmodule Kuroneko.GadgetTest do
         assert File.exists?(Path.join(context.gadget, "configs/c.1/#{function}"))
       end
 
-      refute_received {Kuroneko.Gadget.FakeKV, _put}
+      refute_received {:kept, _kept}
     end
   end
 

@@ -13,7 +13,8 @@ defmodule Kuroneko.Gadget.Storage do
   computer can write to an image that is not read-only. Keep images in
   `/data`, the writable partition of a Nerves device.
 
-  The functions take a `:gadget` option, see `Kuroneko.Gadget`.
+  The functions take a `:gadget` option, `Kuroneko.Gadget.default_gadget/0`
+  by default.
   """
 
   @typedoc "The image in the drive and how the target computer sees it."

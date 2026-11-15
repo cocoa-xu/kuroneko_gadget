@@ -39,7 +39,8 @@ defmodule Kuroneko.Gadget.HID do
     * `:name` - the name to register, `Kuroneko.Gadget.HID` by default
     * `:keyboard`, `:mouse`, `:relative_mouse` - device paths; by default the
       devices of the `Kuroneko.Gadget` functions
-    * `:gadget` - where to look the devices up, see `Kuroneko.Gadget`
+    * `:gadget` - the gadget to look the devices up in,
+      `Kuroneko.Gadget.default_gadget/0` by default
   """
   use GenServer
 
@@ -193,7 +194,7 @@ defmodule Kuroneko.Gadget.HID do
     Process.flag(:trap_exit, true)
 
     state = %{
-      gadget: Keyword.get(opts, :gadget, Kuroneko.Gadget.default_gadget()),
+      gadget: opts[:gadget],
       # For tests: where the device controllers are listed.
       udc_class: Keyword.get(opts, :udc_class, "/sys/class/udc"),
       paths: Map.new(@kinds, &{&1, opts[&1]}),
@@ -418,7 +419,7 @@ defmodule Kuroneko.Gadget.HID do
       state
     else
       _result =
-        with {:ok, udc} <- File.read(Path.join(state.gadget, "UDC")),
+        with {:ok, udc} <- File.read(Path.join(gadget(state), "UDC")),
              dir = Path.join(state.udc_class, String.trim(udc)),
              {:ok, "suspended" <> _rest} <- File.read(Path.join(dir, "state")) do
           File.write(Path.join(dir, "srp"), "1")
@@ -451,14 +452,14 @@ defmodule Kuroneko.Gadget.HID do
 
   defp device_path(%{paths: paths} = state, kind) do
     case paths[kind] do
-      nil -> Kuroneko.Gadget.hid_device(kind, gadget: state.gadget)
+      nil -> Kuroneko.Gadget.hid_device(kind, gadget: gadget(state))
       path -> {:ok, path}
     end
   end
 
   # The function's report descriptor tells the mode.
   defp read_pointer_mode(state) do
-    path = Path.join(Kuroneko.Gadget.function_dir(:mouse, gadget: state.gadget), "report_desc")
+    path = Path.join(Kuroneko.Gadget.function_dir(:mouse, gadget: gadget(state)), "report_desc")
 
     with {:ok, report_desc} <- File.read(path),
          mode when mode != nil <- Descriptor.pointer_mode(report_desc) do
@@ -467,6 +468,10 @@ defmodule Kuroneko.Gadget.HID do
       _ -> :absolute
     end
   end
+
+  # Looked up each time: the gadget may come after the process.
+  defp gadget(%{gadget: nil}), do: Kuroneko.Gadget.default_gadget()
+  defp gadget(%{gadget: gadget}), do: gadget
 
   defp schedule_retry(%{retry: nil} = state) do
     %{state | retry: Process.send_after(self(), :retry, @retry_delay)}

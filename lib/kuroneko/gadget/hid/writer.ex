@@ -43,7 +43,8 @@ defmodule Kuroneko.Gadget.HID.Writer do
             loop(path, device)
 
           {:error, reason} ->
-            # The gadget went away (rebind, unplug): Kuroneko.Gadget.HID opens it again.
+            # The gadget went away (rebind, unplug): Kuroneko.Gadget.HID opens
+            # it again.
             Logger.info("kuroneko_gadget: #{path}: #{inspect(reason)}")
             exit({:shutdown, reason})
         end

@@ -1,51 +1,50 @@
 defmodule Kuroneko.Gadget do
-  @default_gadget "/sys/kernel/config/usb_gadget/nanokvm"
+  @configfs "/sys/kernel/config/usb_gadget"
 
   @moduledoc """
-  The USB functions the target computer sees.
+  The USB functions the target computer sees, on a USB gadget in configfs.
 
-  The NanoKVM-Go Nerves system sets up a USB gadget at boot with a network
-  (NCM) function. This process adds the KVM functions to it:
+  The system sets up the gadget at boot, often with a network function, and
+  binds it to the device controller. This process adds the KVM functions to
+  it:
 
     * `:keyboard` - a boot keyboard, for `Kuroneko.Gadget.HID`
-    * `:mouse` - an absolute pointer, for `Kuroneko.Gadget.HID`; `{:mouse, mode:
-      mode}` makes it an `:absolute` mouse (the default), a `:stylus` (a
-      pen, for Android and iPadOS) or a `:touch` screen
+    * `:mouse` - an absolute pointer, for `Kuroneko.Gadget.HID`; `{:mouse,
+      mode: mode}` makes it an `:absolute` mouse (the default), a `:stylus`
+      (a pen, for Android and iPadOS) or a `:touch` screen
     * `:relative_mouse` - a boot mouse that moves by steps, for
       `Kuroneko.Gadget.HID`, which BIOS setups and games take
-    * `:storage` - a removable drive or CD-ROM drive, for `Kuroneko.Gadget.Storage`
-    * `:microphone` - a microphone, for `NanoKVMGo.Microphone`
-    * `:speaker` - a speaker, for `NanoKVMGo.Audio` with `source: :usb`
+    * `:storage` - a removable drive or CD-ROM drive, for
+      `Kuroneko.Gadget.Storage`
+    * `:microphone` - a microphone the target computer records from
+    * `:speaker` - a speaker the target computer plays to
 
   The microphone and the speaker are the two directions of one USB Audio
-  Class 2 function, which the NanoKVM-Go system shows as the ALSA card
-  `UAC2Gadget`. Each takes its format as options, `{:microphone, options}`:
+  Class 2 function, which Linux shows as the ALSA card `UAC2Gadget`. Each
+  takes its format as options, `{:microphone, options}`:
 
     * `:channels` - 1 (mono) to 8, 2 (stereo) by default
     * `:rates` - the sample rates the target computer can choose from, up to
       10, `[48_000]` by default. The target starts with the first and
       chooses (a Mac in Audio MIDI Setup, Windows in the device's
-      properties); `NanoKVMGo.Microphone` and `NanoKVMGo.Audio` follow its
-      choice.
+      properties).
     * `:sample_bits` - 16, 24 or 32, 16 by default
 
   The target's volume and mute controls act on the samples. The keyboard
-  and mice may wake a target that sleeps, where it allows them. A format the
-  USB controller cannot carry is refused: a packet each 125 µs at the
-  most, of up to 832 bytes to the target and 682 from it. `audio/1` tells
-  the formats the gadget has.
+  and mice may wake a target that sleeps, where it allows them. A format
+  whose packets the device controller cannot carry (`:max_packet`) is
+  refused. `audio/1` tells the formats the gadget has.
 
   Changing the functions disconnects the gadget and connects it again: the
-  target computer sees the NanoKVM unplugged and plugged in, and the USB
+  target computer sees the device unplugged and plugged in, and the USB
   network goes down for a moment. With the functions already there nothing
   happens, so starting the process again is cheap.
 
   When the functions cannot be set up at start, the process logs the error
   and runs on, so that the rest of the application does not go down with
-  it; `functions/1` tells what the gadget has. A change the USB controller
-  refuses (it has seven endpoints for data to the computer: the network
-  takes two, the audio two and each other function one) leaves the
-  functions as they were.
+  it; `functions/1` tells what the gadget has. A change the device
+  controller refuses (each function takes endpoints, and controllers have
+  few) leaves the functions as they were.
 
       children = [
         {Kuroneko.Gadget,
@@ -54,21 +53,36 @@ defmodule Kuroneko.Gadget do
 
   ## The network
 
-  The network function has two MAC addresses: the NanoKVM's, of its
-  interface `usb0`, and the target computer's, of the network adapter the
-  computer sees. The NanoKVM-Go system gives it the same ones at each boot,
-  so that the computer keeps one network interface for the NanoKVM: those
-  in the U-Boot environment's `usbnet_devaddr` and `usbnet_hostaddr`, else
-  addresses made from the serial number (`default_network_addresses/1`).
-  `network/1` tells them; `set_network_addresses/2` changes them at once
-  and keeps them for the next boots.
+  A network function the system set up has two MAC addresses: the device's,
+  of its interface, and the target computer's, of the network adapter the
+  computer sees. `network/1` tells them; `set_network_addresses/2` changes
+  them at once, and the `:persist` function of the `:network` option keeps
+  them for the next boots.
 
   ## Options
 
     * `:functions` - the functions to have, none by default
     * `:name` - the name to register, `Kuroneko.Gadget` by default
-    * `:gadget` - the gadget's configfs directory, `#{@default_gadget}` by
+    * `:gadget` - the gadget's configfs directory, `default_gadget/0` by
       default
+    * `:max_packet` - the largest packets the device controller takes for
+      the `:microphone` and the `:speaker`, in bytes: 1024 each by default,
+      the most high speed carries
+    * `:names` - what the target computer calls the functions, the kernel's
+      names for those left out: `:audio` (the sound card), `:microphone`,
+      `:speaker`, and `:storage` (the drive) as `{vendor, product,
+      revision}` of up to 8, 16 and 4 ASCII characters
+    * `:network` - the network function:
+      * `:function` - its configfs directory, `"ncm.usb0"` by default
+      * `:default_addresses` - the addresses `:default` stands for in
+        `set_network_addresses/2`
+      * `:persist` - a function that keeps addresses for the next boots. It
+        takes those `set_network_addresses/2` was given, a map with
+        `:device_address`, `:host_address` or both, each an address or
+        `:default`, and returns `:ok` or `{:error, reason}`
+
+  Board libraries give these for their boards, such as
+  `NanoKVMGo.USB.gadget_options/1` for the Sipeed NanoKVM-Go.
   """
   use GenServer
   require Logger
@@ -89,8 +103,6 @@ defmodule Kuroneko.Gadget do
   # The order they are added in: the keyboard comes before the mouse.
   @order [:keyboard, :mouse, :relative_mouse, :storage, :microphone, :speaker]
   @audio [:microphone, :speaker]
-  # SCSI INQUIRY: vendor (8), product (16), revision (4).
-  @inquiry "NanoKVM Virtual Media   0100"
   # The configfs attributes of the audio directions start with these.
   @prefix %{microphone: "p_", speaker: "c_"}
   # Channel positions: front left and right, center, LFE, back, side.
@@ -105,6 +117,7 @@ defmodule Kuroneko.Gadget do
     8 => 0x63F
   }
   @max_rates 10
+  @max_packet %{microphone: 1024, speaker: 1024}
   # The device controller's states and speeds in sysfs (usb_state_string,
   # usb_speed_string).
   @states %{
@@ -126,15 +139,8 @@ defmodule Kuroneko.Gadget do
     "super-speed-plus" => :super_speed_plus,
     "UNKNOWN" => :unknown
   }
-  # The largest packets the USB controller (DWC3) takes: its smallest
-  # transmit FIFO holds 832 bytes of one, and the receive FIFO three of 682.
-  @max_packet %{microphone: 832, speaker: 682}
-  # The network function the NanoKVM-Go system sets up, and the U-Boot
-  # variables it takes the addresses from at boot (U-Boot's own names).
-  @ncm "ncm.usb0"
-  @address_variables %{device_address: "usbnet_devaddr", host_address: "usbnet_hostaddr"}
   # The network function's settings that a new one takes over.
-  @ncm_kept [:qmult, :max_segment_size]
+  @network_kept [:qmult, :max_segment_size]
 
   @type function_name() ::
           :keyboard | :mouse | :relative_mouse | :storage | :microphone | :speaker
@@ -188,8 +194,27 @@ defmodule Kuroneko.Gadget do
           | {:host_address, mac_address() | :default}
           | {:persist, boolean()}
 
+  @typedoc "Addresses to keep for the next boots, see the `:network` option."
+  @type kept_addresses() :: %{
+          optional(:device_address | :host_address) => mac_address() | :default
+        }
+
+  @type name_option() ::
+          {:audio | :microphone | :speaker, String.t()}
+          | {:storage, {String.t(), String.t(), String.t()}}
+
+  @type network_option() ::
+          {:function, String.t()}
+          | {:default_addresses, network_addresses() | nil}
+          | {:persist, (kept_addresses() -> :ok | {:error, term()}) | nil}
+
   @type option() ::
-          {:functions, [function_spec()]} | {:name, GenServer.name()} | {:gadget, Path.t()}
+          {:functions, [function_spec()]}
+          | {:name, GenServer.name()}
+          | {:gadget, Path.t()}
+          | {:max_packet, %{optional(:microphone | :speaker) => pos_integer()}}
+          | {:names, [name_option()]}
+          | {:network, [network_option()]}
 
   @doc """
   Starts the process and sets up the functions. See the module documentation
@@ -211,16 +236,17 @@ defmodule Kuroneko.Gadget do
 
   @doc """
   Checks functions without setting them up: whether `configure/2` would
-  take them.
+  take them from a process started with these options (only `:max_packet`
+  counts).
 
       iex> Kuroneko.Gadget.validate([:keyboard, {:microphone, channels: 1, rates: [44_100]}])
       :ok
       iex> Kuroneko.Gadget.validate([{:speaker, sample_bits: 20}])
       {:error, {:invalid_sample_bits, :speaker, 20}}
   """
-  @spec validate([function_spec()]) :: :ok | {:error, term()}
-  def validate(functions) when is_list(functions) do
-    with {:ok, _normalized} <- normalize(functions), do: :ok
+  @spec validate([function_spec()], [option()]) :: :ok | {:error, term()}
+  def validate(functions, opts \\ []) when is_list(functions) do
+    with {:ok, _normalized} <- normalize(functions, max_packet(opts)), do: :ok
   end
 
   @doc """
@@ -238,7 +264,7 @@ defmodule Kuroneko.Gadget do
 
   @doc """
   The USB connection to the target computer: the state the target has put
-  the NanoKVM in, the speed, and the device controller.
+  the device in, the speed, and the device controller.
 
     * `:configured` - the target uses the functions
     * `:suspended` - the target sleeps, or has suspended the port
@@ -261,7 +287,7 @@ defmodule Kuroneko.Gadget do
   def connection(opts \\ []) do
     udc_class = Keyword.get(opts, :udc_class, @udc_class)
 
-    with udc when udc != "" <- bound_udc(Keyword.get(opts, :gadget, @default_gadget)),
+    with udc when udc != "" <- bound_udc(Keyword.get_lazy(opts, :gadget, &default_gadget/0)),
          dir = Path.join(udc_class, udc),
          {:ok, state} <- File.read(Path.join(dir, "state")) do
       speed =
@@ -279,8 +305,8 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc """
-  The USB network: the NanoKVM's interface and its address, the address of
-  the target computer's end, and the addresses both have by default.
+  The USB network: the device's interface and its address, the address of
+  the target computer's end, and the addresses `:default` stands for.
 
   ```
   Kuroneko.Gadget.network()
@@ -294,7 +320,7 @@ defmodule Kuroneko.Gadget do
   ```
 
   The interface is `nil` before the gadget is first bound, and the default
-  addresses `nil` without a serial number.
+  addresses `nil` without the `:network` option's `:default_addresses`.
   """
   @spec network(GenServer.server()) :: {:ok, network()} | {:error, term()}
   def network(server \\ __MODULE__), do: GenServer.call(server, :network)
@@ -302,14 +328,13 @@ defmodule Kuroneko.Gadget do
   @doc """
   Gives the USB network other addresses, MAC addresses or `:default`:
 
-    * `:device_address` - the NanoKVM's
+    * `:device_address` - the device's
     * `:host_address` - the target computer's
 
   One left out stays as it is. The gadget connects again, as when the
-  functions change, and the NanoKVM's interface goes away and comes back
-  with its address. The NanoKVM-Go system gives the network the same
-  addresses at the next boots, from the U-Boot environment
-  (`Nerves.Runtime.KV`), unless `persist: false`.
+  functions change, and the device's interface goes away and comes back
+  with its address. The `:network` option's `:persist` function keeps the
+  addresses for the next boots, unless `persist: false`.
 
   ```
   Kuroneko.Gadget.set_network_addresses(host_address: "02:12:34:56:78:9a")
@@ -318,7 +343,8 @@ defmodule Kuroneko.Gadget do
 
   Refused: an address that is not one (`{:invalid_address, key, value}`)
   or is a multicast address (`{:multicast_address, key, value}`), and the
-  same address at both ends (`:same_addresses`).
+  same address at both ends (`:same_addresses`). Addresses set but not
+  kept give `{:error, {:not_kept, reason}}`.
   """
   @spec set_network_addresses(GenServer.server(), [network_setting()]) :: :ok | {:error, term()}
   def set_network_addresses(server \\ __MODULE__, settings) when is_list(settings) do
@@ -336,28 +362,23 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc """
-  The addresses the NanoKVM-Go system gives the USB network when the U-Boot
-  environment has none: the first six bytes of the SHA-256 of the serial
-  number (`boardid`'s) for the NanoKVM's end and the next six for the
-  computer's, as locally administered unicast addresses.
-
-      iex> Kuroneko.Gadget.default_network_addresses("6a1a78455040f186")
-      %{device_address: "ea:52:ab:b6:67:a7", host_address: "2e:53:95:27:a5:9d"}
-  """
-  @spec default_network_addresses(String.t()) :: network_addresses()
-  def default_network_addresses(serial_number) when is_binary(serial_number) do
-    <<device::binary-6, host::binary-6, _rest::binary>> = :crypto.hash(:sha256, serial_number)
-    %{device_address: local_address(device), host_address: local_address(host)}
-  end
-
-  defp local_address(<<first, rest::binary-5>>),
-    do: format_address(<<(first &&& 0xFC) ||| 0x02, rest::binary>>)
-
-  @doc """
-  The configfs directory of the gadget the NanoKVM-Go system sets up.
+  The gadget the functions go on when none is given: the `:gadget` in the
+  `:kuroneko_gadget` application environment, else the only gadget in
+  configfs, else `#{@configfs}/kuroneko`.
   """
   @spec default_gadget() :: Path.t()
-  def default_gadget, do: @default_gadget
+  def default_gadget do
+    Application.get_env(:kuroneko_gadget, :gadget) || only_gadget(@configfs)
+  end
+
+  @doc false
+  @spec only_gadget(Path.t()) :: Path.t()
+  def only_gadget(configfs) do
+    case File.ls(configfs) do
+      {:ok, [name]} -> Path.join(configfs, name)
+      _none_or_several -> Path.join(configfs, "kuroneko")
+    end
+  end
 
   @doc """
   The device of a HID function, such as `"/dev/hidg0"`.
@@ -383,27 +404,36 @@ defmodule Kuroneko.Gadget do
   @doc false
   @spec function_dir(function_name(), keyword()) :: Path.t()
   def function_dir(function, opts) do
-    Path.join([Keyword.get(opts, :gadget, @default_gadget), "functions", @dirs[function]])
+    gadget = Keyword.get_lazy(opts, :gadget, &default_gadget/0)
+    Path.join([gadget, "functions", @dirs[function]])
   end
 
   @impl GenServer
   def init(opts) do
     functions = Keyword.get(opts, :functions, [])
+    max_packet = max_packet(opts)
+    names = Keyword.get(opts, :names, [])
+    network = Keyword.get(opts, :network, [])
 
-    with {:error, reason} <- normalize(functions) do
+    with {:error, reason} <- normalize(functions, max_packet) do
       raise ArgumentError, "invalid USB functions: #{inspect(reason)}"
     end
 
-    serial_number = Keyword.get_lazy(opts, :serial_number, &serial_number/0)
+    Enum.each(names, &check_name!/1)
 
     state = %{
-      gadget: Keyword.get(opts, :gadget, @default_gadget),
-      default_addresses: serial_number && default_network_addresses(serial_number),
-      # For tests: where the device controllers are listed, where the
-      # addresses are kept, and how a function goes (configfs takes its
-      # attributes with it, a plain directory does not).
+      gadget: Keyword.get_lazy(opts, :gadget, &default_gadget/0),
+      max_packet: max_packet,
+      names: Map.new(names),
+      network: %{
+        function: Keyword.get(network, :function, "ncm.usb0"),
+        default_addresses: Keyword.get(network, :default_addresses),
+        persist: Keyword.get(network, :persist)
+      },
+      # For tests: where the device controllers are listed, and how a
+      # function goes (configfs takes its attributes with it, a plain
+      # directory does not).
       udc_class: Keyword.get(opts, :udc_class, @udc_class),
-      kv: Keyword.get(opts, :kv, Nerves.Runtime.KV),
       rmdir: Keyword.get(opts, :rmdir, &File.rmdir/1)
     }
 
@@ -458,22 +488,26 @@ defmodule Kuroneko.Gadget do
     {:reply, reply, state}
   end
 
-  # The serial number the NanoKVM-Go system makes the default addresses
-  # from, as its shell takes it: without the newlines at the end.
-  defp serial_number do
-    with {id, 0} <- System.cmd("boardid", []),
-         id when id != "" <- String.trim_trailing(id, "\n") do
-      id
-    else
-      _ -> nil
-    end
-  rescue
-    # No boardid: not a Nerves device.
-    ErlangError -> nil
+  defp max_packet(opts), do: Map.merge(@max_packet, Map.new(Keyword.get(opts, :max_packet, %{})))
+
+  defp check_name!(name) do
+    valid =
+      case name do
+        {key, text} when key in [:audio, :microphone, :speaker] ->
+          is_binary(text)
+
+        {:storage, {vendor, product, revision}} ->
+          Enum.all?([vendor, product, revision], &is_binary/1)
+
+        _other ->
+          false
+      end
+
+    valid || raise ArgumentError, "invalid USB function name: #{inspect(name)}"
   end
 
   defp read_network(state) do
-    dir = Path.join([state.gadget, "functions", @ncm])
+    dir = Path.join([state.gadget, "functions", state.network.function])
 
     with :ok <- check_gadget(state.gadget),
          {:ok, device} <- read_address(dir, "dev_addr"),
@@ -483,7 +517,7 @@ defmodule Kuroneko.Gadget do
          interface: read_interface(dir),
          device_address: device,
          host_address: host,
-         default_addresses: state.default_addresses
+         default_addresses: state.network.default_addresses
        }}
     end
   end
@@ -587,7 +621,7 @@ defmodule Kuroneko.Gadget do
 
     gadget = state.gadget
     udc = bound_udc(gadget)
-    links = links(gadget)
+    links = links(state)
 
     result =
       with :ok <- unbind(gadget, udc),
@@ -603,11 +637,10 @@ defmodule Kuroneko.Gadget do
   end
 
   # The configuration's functions, in the order to link them again: the
-  # network first, as the NanoKVM-Go system has it, then the KVM functions
-  # and any others.
-  defp links(gadget) do
-    config = Path.join(gadget, @config)
-    order = Enum.uniq([@ncm | Enum.map(@order, &@dirs[&1])])
+  # network first, then the KVM functions and any others.
+  defp links(state) do
+    config = Path.join(state.gadget, @config)
+    order = Enum.uniq([state.network.function | Enum.map(@order, &@dirs[&1])])
 
     case File.ls(config) do
       {:ok, names} ->
@@ -639,17 +672,17 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  # The NanoKVM's address is that of its interface, which the function makes
+  # The device's address is that of its interface, which the function makes
   # when it is first bound: another address takes a new function. The
   # computer's is read when the function is linked.
   defp write_addresses(state, current, wanted) do
-    dir = Path.join([state.gadget, "functions", @ncm])
+    dir = Path.join([state.gadget, "functions", state.network.function])
 
     if wanted.device_address == current.device_address do
       write_all(dir, host_addr: wanted.host_address)
     else
       kept =
-        for name <- @ncm_kept,
+        for name <- @network_kept,
             {:ok, value} <- [File.read(Path.join(dir, Atom.to_string(name)))],
             do: {name, String.trim(value)}
 
@@ -661,27 +694,27 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  # The NanoKVM-Go system reads them at boot; empty is the default.
+  # The addresses asked for, or :default, to the :persist function.
+  defp persist(%{network: %{persist: nil}}, _settings, _wanted), do: :ok
+
   defp persist(state, settings, wanted) do
-    variables =
-      for {key, variable} <- @address_variables, Keyword.has_key?(settings, key), into: %{} do
-        {variable, if(settings[key] == :default, do: "", else: wanted[key])}
+    kept =
+      for key <- [:device_address, :host_address], Keyword.has_key?(settings, key), into: %{} do
+        {key, if(settings[key] == :default, do: :default, else: wanted[key])}
       end
 
-    cond do
-      variables == %{} ->
-        :ok
+    if kept == %{}, do: :ok, else: keep(state.network.persist, kept)
+  end
 
-      Code.ensure_loaded?(state.kv) ->
-        with {:error, reason} <- state.kv.put(variables), do: {:error, {:not_kept, reason}}
-
-      true ->
-        {:error, {:not_kept, {:undefined, state.kv}}}
+  defp keep(persist, kept) do
+    case persist.(kept) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:not_kept, reason}}
     end
   end
 
   defp apply_functions(state, functions) do
-    with {:ok, wanted} <- normalize(functions),
+    with {:ok, wanted} <- normalize(functions, state.max_packet),
          :ok <- check_gadget(state.gadget) do
       present = present(state.gadget)
 
@@ -708,7 +741,7 @@ defmodule Kuroneko.Gadget do
   defp switch(state, udc, from, to) do
     with :ok <- unbind(state.gadget, bound_udc(state.gadget)),
          :ok <- each(from -- to, &remove(state.gadget, &1)),
-         :ok <- each(to -- from, &add(state.gadget, &1)),
+         :ok <- each(to -- from, &add(state, &1)),
          # Bus powered, and the keyboard and mice may wake the target.
          :ok <- write_existing(Path.join(state.gadget, @config), bmAttributes: "0xa0") do
       bind(state, udc)
@@ -783,12 +816,13 @@ defmodule Kuroneko.Gadget do
   defp name({function, _format}), do: function
   defp name(function), do: function
 
-  defp add(gadget, unit) do
-    dir = function_dir(unit_function(unit), gadget: gadget)
+  defp add(state, unit) do
+    function = unit_function(unit)
+    dir = function_dir(function, gadget: state.gadget)
 
     with :ok <- File.mkdir_p(dir),
-         :ok <- setup(dir, unit) do
-      File.ln_s(dir, link(gadget, unit_function(unit)))
+         :ok <- setup(dir, unit, state) do
+      File.ln_s(dir, link(state.gadget, function))
     end
   end
 
@@ -796,47 +830,60 @@ defmodule Kuroneko.Gadget do
   defp unit_function({function, _options}), do: function
   defp unit_function(function), do: function
 
-  defp setup(dir, :keyboard), do: setup_hid(dir, Descriptor.keyboard())
-  defp setup(dir, {:mouse, %{mode: mode}}), do: setup_hid(dir, Descriptor.mouse(mode))
-  defp setup(dir, :relative_mouse), do: setup_hid(dir, Descriptor.relative_mouse())
+  defp setup(dir, :keyboard, _state), do: setup_hid(dir, Descriptor.keyboard())
+  defp setup(dir, {:mouse, %{mode: mode}}, _state), do: setup_hid(dir, Descriptor.mouse(mode))
+  defp setup(dir, :relative_mouse, _state), do: setup_hid(dir, Descriptor.relative_mouse())
 
   # configfs makes lun.0 with the function; mkdir_p is for plain directories.
-  defp setup(dir, :storage) do
+  defp setup(dir, :storage, state) do
     lun = Path.join(dir, "lun.0")
 
+    inquiry =
+      case state.names[:storage] do
+        {vendor, product, revision} -> [inquiry_string: inquiry(vendor, product, revision)]
+        nil -> []
+      end
+
     with :ok <- File.mkdir_p(lun) do
-      write_all(lun, removable: "1", cdrom: "0", ro: "0", nofua: "0", inquiry_string: @inquiry)
+      write_all(lun, [removable: "1", cdrom: "0", ro: "0", nofua: "0"] ++ inquiry)
     end
   end
 
-  defp setup(dir, {:audio, audio}) do
-    with :ok <- write_all(dir, direction(:microphone, audio[:microphone])),
-         :ok <- write_all(dir, direction(:speaker, audio[:speaker])),
+  defp setup(dir, {:audio, audio}, state) do
+    with :ok <- write_all(dir, direction(:microphone, audio[:microphone], state.max_packet)),
+         :ok <- write_all(dir, direction(:speaker, audio[:speaker], state.max_packet)),
          # No feedback endpoint: the speaker follows the computer's clock.
          :ok <- write_all(dir, c_sync: "adaptive") do
-      # Where the kernel takes them: the names the computer shows, and no
-      # interrupt endpoint, which the controls do without and the
-      # functions need.
-      write_existing(dir,
-        int_ep_present: "0",
-        function_name: "NanoKVM-Go Audio",
-        c_alt0_name: "NanoKVM-Go Speaker",
-        c_alt1_name: "NanoKVM-Go Speaker",
-        p_alt0_name: "NanoKVM-Go Microphone",
-        p_alt1_name: "NanoKVM-Go Microphone"
-      )
+      # Where the kernel takes them: no interrupt endpoint, which the
+      # controls do without and the functions need, and the names.
+      write_existing(dir, [int_ep_present: "0"] ++ audio_names(state.names))
     end
+  end
+
+  # SCSI INQUIRY: vendor (8), product (16), revision (4), padded.
+  defp inquiry(vendor, product, revision),
+    do: field(vendor, 8) <> field(product, 16) <> field(revision, 4)
+
+  defp field(text, size), do: text |> String.pad_trailing(size) |> binary_part(0, size)
+
+  defp audio_names(names) do
+    Enum.flat_map(names, fn
+      {:audio, name} -> [function_name: name]
+      {:speaker, name} -> [c_alt0_name: name, c_alt1_name: name]
+      {:microphone, name} -> [p_alt0_name: name, p_alt1_name: name]
+      {:storage, _name} -> []
+    end)
   end
 
   # A direction left out has no channels.
-  defp direction(function, nil), do: [{attribute(function, "chmask"), "0"}]
+  defp direction(function, nil, _max_packet), do: [{attribute(function, "chmask"), "0"}]
 
-  defp direction(function, format) do
+  defp direction(function, format, max_packet) do
     [
       {attribute(function, "chmask"), Integer.to_string(@channel_masks[format.channels])},
       {attribute(function, "srate"), Enum.map_join(format.rates, ",", &Integer.to_string/1)},
       {attribute(function, "ssize"), Integer.to_string(div(format.sample_bits, 8))},
-      {attribute(function, "hs_bint"), Integer.to_string(interval(function, format))}
+      {attribute(function, "hs_bint"), Integer.to_string(interval(function, format, max_packet))}
     ]
   end
 
@@ -908,17 +955,19 @@ defmodule Kuroneko.Gadget do
 
   # The functions asked for in @order, the audio directions with their
   # formats.
-  defp normalize(specs) do
-    with {:ok, entries} <- collect(specs, &entry/1),
+  defp normalize(specs, max_packet) do
+    with {:ok, entries} <- collect(specs, &entry(&1, max_packet)),
          :ok <- unique(Enum.map(entries, &name/1)) do
       {:ok, Enum.sort_by(entries, &Enum.find_index(@order, fn f -> f == name(&1) end))}
     end
   end
 
-  defp entry(function) when function in [:mouse | @audio], do: entry({function, []})
-  defp entry(function) when function in @order, do: {:ok, function}
+  defp entry(function, max_packet) when function in [:mouse | @audio],
+    do: entry({function, []}, max_packet)
 
-  defp entry({:mouse, opts}) when is_list(opts) do
+  defp entry(function, _max_packet) when function in @order, do: {:ok, function}
+
+  defp entry({:mouse, opts}, _max_packet) when is_list(opts) do
     case Keyword.pop(opts, :mode, :absolute) do
       {mode, []} when mode in [:absolute, :stylus, :touch] -> {:ok, {:mouse, %{mode: mode}}}
       {mode, []} -> {:error, {:invalid_mode, :mouse, mode}}
@@ -926,11 +975,12 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  defp entry({function, opts}) when function in @audio and is_list(opts) do
-    with {:ok, format} <- audio_format(function, opts), do: {:ok, {function, format}}
+  defp entry({function, opts}, max_packet) when function in @audio and is_list(opts) do
+    with {:ok, format} <- audio_format(function, opts, max_packet),
+         do: {:ok, {function, format}}
   end
 
-  defp entry(other), do: {:error, {:unknown_function, other}}
+  defp entry(other, _max_packet), do: {:error, {:unknown_function, other}}
 
   defp unique(names) do
     case names -- Enum.uniq(names) do
@@ -939,7 +989,7 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  defp audio_format(function, opts) do
+  defp audio_format(function, opts, max_packet) do
     format = %{
       channels: Keyword.get(opts, :channels, 2),
       rates: opts |> Keyword.get(:rates, [48_000]) |> uniq_rates(),
@@ -959,7 +1009,7 @@ defmodule Kuroneko.Gadget do
       format.sample_bits not in [16, 24, 32] ->
         {:error, {:invalid_sample_bits, function, format.sample_bits}}
 
-      interval(function, format) == nil ->
+      interval(function, format, max_packet) == nil ->
         {:error, {:too_much_bandwidth, function, format}}
 
       true ->
@@ -977,8 +1027,8 @@ defmodule Kuroneko.Gadget do
 
   # High speed sends a packet each 125 µs × 2^(interval - 1): the longest
   # interval whose packets the controller takes, nil for none.
-  defp interval(function, format) do
-    Enum.find(4..1//-1, &(packet(function, format, &1) <= @max_packet[function]))
+  defp interval(function, format, max_packet) do
+    Enum.find(4..1//-1, &(packet(function, format, &1) <= max_packet[function]))
   end
 
   # The bytes of a packet, as f_uac2 reckons them: the microphone may run
