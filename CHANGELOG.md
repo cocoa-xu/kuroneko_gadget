@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.0 (2026-11-21)
 
 First version, moved out of `nano_kvm_go` (where it was `NanoKVMGo.USB`,
 `NanoKVMGo.HID` and `NanoKVMGo.Storage`):
