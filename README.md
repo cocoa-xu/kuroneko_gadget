@@ -28,7 +28,7 @@ NanoKVM-Go.
 ```elixir
 def deps do
   [
-    {:kuroneko_gadget, github: "cocoa-xu/kuroneko_gadget"}
+    {:kuroneko_gadget, github: "cocoa-xu/kuroneko_gadget", tag: "v0.1.0"}
   ]
 end
 ```
