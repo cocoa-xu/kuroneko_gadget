@@ -192,6 +192,10 @@ defmodule Kuroneko.Gadget do
   @type audio_option() ::
           {:channels, 1..8} | {:rates, [pos_integer()]} | {:sample_bits, 16 | 24 | 32}
 
+  @typedoc """
+  A function to have: its kind alone, or with options, `:name` among them.
+  See the module documentation.
+  """
   @type function_spec() ::
           function_name()
           | {:microphone | :speaker, [audio_option() | {:name, String.t()}]}
@@ -284,6 +288,10 @@ defmodule Kuroneko.Gadget do
   Sets up these functions and removes the other KVM functions. Network
   functions are among them when the list has a `:network`; without one, the
   network the system set up stays as it is.
+
+      Kuroneko.Gadget.configure([:keyboard, :mouse, {:storage, luns: 3}])
+      Kuroneko.Gadget.configure([:keyboard, :storage, {:storage, name: "boot"}])
+      Kuroneko.Gadget.configure([:network, {:network, name: "usb1"}, :keyboard])
   """
   @spec configure(GenServer.server(), [function_spec()]) :: :ok | {:error, term()}
   def configure(server \\ __MODULE__, functions) when is_list(functions) do
@@ -300,6 +308,11 @@ defmodule Kuroneko.Gadget do
       :ok
       iex> Kuroneko.Gadget.validate([{:speaker, sample_bits: 20}])
       {:error, {:invalid_sample_bits, :speaker, 20}}
+      iex> Kuroneko.Gadget.validate([{:storage, luns: 17}])
+      {:error, {:invalid_luns, 17}}
+      iex> Kuroneko.Gadget.validate([:storage, {:storage, name: "boot"}, :microphone],
+      ...>   endpoints: %{in: 2, out: 2})
+      {:error, {:not_enough_endpoints, %{need: %{in: 3, out: 2}, have: %{in: 2, out: 2}}}}
   """
   @spec validate([function_spec()], [option()]) :: :ok | {:error, term()}
   def validate(functions, opts \\ []) when is_list(functions) do
@@ -325,9 +338,12 @@ defmodule Kuroneko.Gadget do
   def instances(server \\ __MODULE__), do: GenServer.call(server, :instances)
 
   @doc """
-  The endpoints the functions take, `%{in: 4, out: 1}`: each HID function
-  one IN, a storage function one of each, a network function two IN and one
+  The endpoints the functions take: each HID function one IN, a storage
+  function one of each whatever its LUNs, a network function two IN and one
   OUT, a microphone one IN, a speaker one OUT. Endpoint 0 is not counted.
+
+      iex> Kuroneko.Gadget.endpoints([:keyboard, :mouse, {:storage, luns: 4}, :network])
+      {:ok, %{in: 5, out: 2}}
   """
   @spec endpoints([function_spec()]) ::
           {:ok, %{in: non_neg_integer(), out: non_neg_integer()}} | {:error, term()}
@@ -337,8 +353,9 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc """
-  The formats of the audio directions the gadget has, such as
-  `%{microphone: %{channels: 2, rates: [48_000], sample_bits: 16}}`.
+  The formats of the audio directions of the sound card named `"audio"`,
+  the default one, such as `%{microphone: %{channels: 2, rates: [48_000],
+  sample_bits: 16}}`. `instances/1` tells those of any sound card.
   """
   @spec audio(GenServer.server()) :: %{optional(:microphone | :speaker) => audio_format()}
   def audio(server \\ __MODULE__), do: GenServer.call(server, :audio)
@@ -386,8 +403,9 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc """
-  The USB network: the device's interface and its address, the address of
-  the target computer's end, and the addresses `:default` stands for.
+  The USB network the system set up (the `:network` option's function): the
+  device's interface and its address, the address of the target computer's
+  end, and the addresses `:default` stands for.
 
   ```
   Kuroneko.Gadget.network()
@@ -462,9 +480,13 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc """
-  The device of a HID function, such as `"/dev/hidg0"`.
+  The device of a HID function, such as `"/dev/hidg0"`: the kind's default
+  one, or the one `:name` names.
 
   Takes the `:gadget` option.
+
+      Kuroneko.Gadget.hid_device(:keyboard)
+      Kuroneko.Gadget.hid_device(:keyboard, name: "keyboard2")
   """
   @spec hid_device(:keyboard | :mouse | :relative_mouse, keyword()) ::
           {:ok, Path.t()} | {:error, term()}

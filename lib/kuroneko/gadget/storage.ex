@@ -60,6 +60,10 @@ defmodule Kuroneko.Gadget.Storage do
       `profile` attribute only `:cd` goes, and is the default
     * `:read_only` - the target computer cannot write; by default for optical
       drives
+    * `:storage` - the storage function, `"disk"` by default
+    * `:lun` - its logical unit, 0 by default
+
+      Kuroneko.Gadget.Storage.insert("/data/images/tools.iso", storage: "boot", lun: 1)
   """
   @spec insert(Path.t(), [insert_option()]) :: :ok | {:error, term()}
   def insert(image, opts \\ []) do
