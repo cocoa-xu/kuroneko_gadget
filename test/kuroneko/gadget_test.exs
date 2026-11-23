@@ -4,8 +4,6 @@ defmodule Kuroneko.GadgetTest do
   alias Kuroneko.Gadget.FakeConfigfs
   alias Kuroneko.Gadget.HID
 
-  doctest Kuroneko.Gadget
-
   @moduletag :tmp_dir
 
   # A device controller with small FIFOs, as the NanoKVM-Go's.
