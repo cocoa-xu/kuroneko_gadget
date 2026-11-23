@@ -651,6 +651,13 @@ defmodule Kuroneko.GadgetTest do
       assert Kuroneko.Gadget.functions(pid) == [:network, :keyboard]
       device = FakeConfigfs.read(gadget, "functions/ncm.usb1/dev_addr")
       host = FakeConfigfs.read(gadget, "functions/ncm.usb1/host_addr")
+
+      # The kernel names the interface when it binds the function.
+      File.write!(Path.join(gadget, "functions/ncm.usb1/ifname"), "usb1\n")
+
+      assert %{interface: "usb1", device_address: ^device, host_address: ^host} =
+               Enum.find(Kuroneko.Gadget.instances(pid), &(&1.name == "usb1"))
+
       assert device =~ ~r/^[0-9a-f][26ae](:[0-9a-f]{2}){5}$/
       assert host =~ ~r/^[0-9a-f][26ae](:[0-9a-f]{2}){5}$/
       assert device != host

@@ -10,7 +10,8 @@
   `Kuroneko.Gadget.Storage` takes `:storage` and `:lun` for one, and tells
   them all with `luns/1` and `media/1`
 * Network functions as KVM functions when asked for with `:network`, other
-  networks with addresses that stay across boots
+  networks with addresses that stay across boots; `instances/1` tells each
+  network's interface and addresses
 * The device controller's endpoints as a budget, `:endpoints`, and
   `Kuroneko.Gadget.endpoints/1`; `endpoints_in_use/1` tells how many the
   gadget's functions take now

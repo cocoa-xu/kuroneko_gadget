@@ -328,9 +328,12 @@ defmodule Kuroneko.Gadget do
 
   @doc """
   The functions on the gadget that this module knows, each with its kind and
-  name, as `configure/2` takes them back:
+  name, as `configure/2` takes them back. A network also has its interface
+  on the device (`nil` before the gadget is first bound) and its addresses:
 
-      [%{kind: :network, name: "usb0"}, %{kind: :keyboard, name: "keyboard"},
+      [%{kind: :network, name: "usb0", interface: "usb0",
+         device_address: "9e:9f:51:11:f7:b2", host_address: "7a:78:1f:1f:1d:dd"},
+       %{kind: :keyboard, name: "keyboard"},
        %{kind: :storage, name: "disk", luns: 2},
        %{kind: :audio, name: "audio", microphone: %{channels: 2, ...}, speaker: nil}]
   """
@@ -590,7 +593,31 @@ defmodule Kuroneko.Gadget do
     {:reply, kinds, state}
   end
 
-  def handle_call(:instances, _from, state), do: {:reply, present(state.gadget), state}
+  def handle_call(:instances, _from, state) do
+    instances =
+      Enum.map(present(state.gadget), fn
+        %{kind: :network} = network ->
+          dir = dir(state.gadget, network)
+
+          address = fn attribute ->
+            case read_address(dir, attribute) do
+              {:ok, address} -> address
+              {:error, _reason} -> nil
+            end
+          end
+
+          Map.merge(network, %{
+            interface: read_interface(dir),
+            device_address: address.("dev_addr"),
+            host_address: address.("host_addr")
+          })
+
+        instance ->
+          instance
+      end)
+
+    {:reply, instances, state}
+  end
 
   def handle_call(:endpoints_in_use, _from, state),
     do: {:reply, Map.put(count_endpoints(present(state.gadget)), :have, state.endpoints), state}
