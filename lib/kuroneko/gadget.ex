@@ -14,16 +14,17 @@ defmodule Kuroneko.Gadget do
       (a pen, for Android and iPadOS) or a `:touch` screen
     * `:relative_mouse` - a boot mouse that moves by steps, for
       `Kuroneko.Gadget.HID`, which BIOS setups and games take
-    * `:storage` - removable drives or optical drives, for
-      `Kuroneko.Gadget.Storage`; `{:storage, drives: 3}` has three, up to 16,
-      which take the endpoints of one
+    * `:storage` - a USB mass storage device, removable drives or optical
+      drives, for `Kuroneko.Gadget.Storage`. Its logical units (LUNs) are the
+      drives the target sees: `{:storage, luns: 3}` has three, up to 16, on
+      the endpoints of one
     * `:network` - a USB network adapter (NCM), see "The network" below
     * `:microphone` - a microphone the target computer records from
     * `:speaker` - a speaker the target computer plays to
 
   There may be several functions of a kind, each with a `:name`:
   `[:storage, {:storage, name: "boot"}]` are two storage functions, which the
-  target sees as two devices. Without a name a function is its kind's first:
+  target sees as two devices, each with its own LUN 0. Without a name a function is its kind's first:
   `"keyboard"`, `"mouse"`, `"relative_mouse"`, `"disk"`, `"usb0"`, `"audio"`.
   Names take letters, digits, `_` and `-`. `instances/1` tells what the
   gadget has.
@@ -142,7 +143,7 @@ defmodule Kuroneko.Gadget do
   @order [:network, :keyboard, :mouse, :relative_mouse, :storage, :audio]
   @audio [:microphone, :speaker]
   @hid [:keyboard, :mouse, :relative_mouse]
-  @max_drives 16
+  @max_luns 16
   # The LUN settings a storage function keeps when it changes, in the order
   # they are written back: the medium last.
   @lun_settings [:removable, :cdrom, :profile, :ro, :nofua, :inquiry_string, :file]
@@ -195,7 +196,7 @@ defmodule Kuroneko.Gadget do
           function_name()
           | {:microphone | :speaker, [audio_option() | {:name, String.t()}]}
           | {:mouse, [mode: Kuroneko.Gadget.HID.pointer_mode(), name: String.t()]}
-          | {:storage, [drives: 1..16, name: String.t()]}
+          | {:storage, [luns: 1..16, name: String.t()]}
           | {:keyboard | :relative_mouse | :network, [name: String.t()]}
 
   @typedoc "A function on the gadget, see `instances/1`."
@@ -317,7 +318,7 @@ defmodule Kuroneko.Gadget do
   name, as `configure/2` takes them back:
 
       [%{kind: :network, name: "usb0"}, %{kind: :keyboard, name: "keyboard"},
-       %{kind: :storage, name: "disk", drives: 2},
+       %{kind: :storage, name: "disk", luns: 2},
        %{kind: :audio, name: "audio", microphone: %{channels: 2, ...}, speaker: nil}]
   """
   @spec instances(GenServer.server()) :: [instance()]
@@ -855,7 +856,7 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  # A storage function that changes keeps the media of the drives it keeps.
+  # A storage function that changes keeps the media of the LUNs it keeps.
   defp switch(state, udc, from, to) do
     kept =
       for %{kind: :storage, name: name} = old <- from -- to,
@@ -897,7 +898,7 @@ defmodule Kuroneko.Gadget do
   defp instance_of(dir) do
     case String.split(Path.basename(dir), ".", parts: 2) do
       ["hid", name] -> hid_instance(dir, name)
-      ["mass_storage", name] -> [%{kind: :storage, name: name, drives: max(count_luns(dir), 1)}]
+      ["mass_storage", name] -> [%{kind: :storage, name: name, luns: max(count_luns(dir), 1)}]
       ["ncm", name] -> [%{kind: :network, name: name}]
       ["uac2", name] -> audio_instance(dir, name)
       _other -> []
@@ -988,15 +989,15 @@ defmodule Kuroneko.Gadget do
 
   # configfs makes lun.0 with the function, the others with mkdir; mkdir_p
   # is for plain directories.
-  defp setup(dir, %{kind: :storage, drives: drives}, state) do
+  defp setup(dir, %{kind: :storage, luns: luns}, state) do
     inquiry =
       case state.names[:storage] do
         {vendor, product, revision} -> [inquiry_string: inquiry(vendor, product, revision)]
         nil -> []
       end
 
-    each(0..(drives - 1), fn drive ->
-      lun = Path.join(dir, "lun.#{drive}")
+    each(0..(luns - 1), fn number ->
+      lun = Path.join(dir, "lun.#{number}")
 
       with :ok <- File.mkdir_p(lun),
            do: write_all(lun, [removable: "1", cdrom: "0", ro: "0", nofua: "0"] ++ inquiry)
@@ -1044,26 +1045,26 @@ defmodule Kuroneko.Gadget do
     %{device_address: address.("device"), host_address: address.("host")}
   end
 
-  # The media of a storage function's drives, to write back when it changes.
+  # The media of a storage function's LUNs, to write back when it changes.
   defp lun_settings(dir) do
-    for drive <- 0..(count_luns(dir) - 1)//1, into: %{} do
-      lun = Path.join(dir, "lun.#{drive}")
+    for number <- 0..(count_luns(dir) - 1)//1, into: %{} do
+      lun = Path.join(dir, "lun.#{number}")
 
       settings =
         for name <- @lun_settings,
             {:ok, value} <- [File.read(Path.join(lun, Atom.to_string(name)))],
             do: {name, String.trim_trailing(value, "\n")}
 
-      {drive, settings}
+      {number, settings}
     end
   end
 
   defp restore_luns(_dir, _instance, nil), do: :ok
 
   # Every kernel has a LUN's file; the other settings where it has them.
-  defp restore_luns(dir, %{drives: drives}, kept) do
-    each(Enum.filter(kept, fn {drive, _settings} -> drive < drives end), fn {drive, settings} ->
-      lun = Path.join(dir, "lun.#{drive}")
+  defp restore_luns(dir, %{luns: luns}, kept) do
+    each(Enum.filter(kept, fn {number, _settings} -> number < luns end), fn {number, settings} ->
+      lun = Path.join(dir, "lun.#{number}")
       {file, others} = Keyword.split(settings, [:file])
 
       with :ok <- write_existing(lun, others),
@@ -1114,12 +1115,12 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  # configfs removes a function's attributes with it, its extra drives first.
+  # configfs removes a function's attributes with it, its extra LUNs first.
   defp remove(state, instance) do
     dir = dir(state.gadget, instance)
 
     extra_luns =
-      for drive <- (count_luns(dir) - 1)..1//-1, do: Path.join(dir, "lun.#{drive}")
+      for number <- (count_luns(dir) - 1)..1//-1, do: Path.join(dir, "lun.#{number}")
 
     with :ok <- File.rm(link_path(state.gadget, instance)),
          :ok <- each(extra_luns, state.rmdir) do
@@ -1206,12 +1207,12 @@ defmodule Kuroneko.Gadget do
   end
 
   defp kind_entry(:storage, name, opts, _max_packet) do
-    case Keyword.pop(opts, :drives, 1) do
-      {drives, []} when drives in 1..@max_drives ->
-        {:ok, %{kind: :storage, name: name, drives: drives}}
+    case Keyword.pop(opts, :luns, 1) do
+      {luns, []} when luns in 1..@max_luns ->
+        {:ok, %{kind: :storage, name: name, luns: luns}}
 
-      {drives, []} ->
-        {:error, {:invalid_drives, drives}}
+      {luns, []} ->
+        {:error, {:invalid_luns, luns}}
 
       {_drives, rest} ->
         {:error, {:unknown_options, :storage, Keyword.keys(rest)}}

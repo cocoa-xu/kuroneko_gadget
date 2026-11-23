@@ -554,20 +554,20 @@ defmodule Kuroneko.GadgetTest do
   end
 
   describe "several of a kind" do
-    # configfs takes a function's attributes and drives with it.
+    # configfs takes a function's attributes and LUNs with it.
     defp rm_rf(dir) do
       File.rm_rf!(dir)
       :ok
     end
 
-    test "a storage function with several drives keeps their media when it changes", %{
+    test "a storage function with several LUNs keeps their media when it changes", %{
       gadget: gadget,
       udc_class: udc_class
     } do
       pid =
         start_supervised!(
           {Kuroneko.Gadget,
-           functions: [{:storage, drives: 2}],
+           functions: [{:storage, luns: 2}],
            gadget: gadget,
            udc_class: udc_class,
            rmdir: &rm_rf/1,
@@ -585,9 +585,9 @@ defmodule Kuroneko.GadgetTest do
       File.write!(Path.join(lun1, "cdrom"), "1")
       File.write!(Path.join(lun1, "file"), "/data/images/debian.iso\n")
 
-      assert :ok = Kuroneko.Gadget.configure(pid, [{:storage, drives: 3}])
+      assert :ok = Kuroneko.Gadget.configure(pid, [{:storage, luns: 3}])
 
-      assert [%{kind: :network, name: "usb0"}, %{kind: :storage, name: "disk", drives: 3}] =
+      assert [%{kind: :network, name: "usb0"}, %{kind: :storage, name: "disk", luns: 3}] =
                Kuroneko.Gadget.instances(pid)
 
       assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.1/cdrom") == "1"
@@ -597,8 +597,8 @@ defmodule Kuroneko.GadgetTest do
 
       assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.2/cdrom") == "0"
 
-      assert {:error, {:invalid_drives, 17}} =
-               Kuroneko.Gadget.configure(pid, [{:storage, drives: 17}])
+      assert {:error, {:invalid_luns, 17}} =
+               Kuroneko.Gadget.configure(pid, [{:storage, luns: 17}])
     end
 
     test "functions of a kind by their names", %{gadget: gadget, udc_class: udc_class} do
@@ -617,8 +617,8 @@ defmodule Kuroneko.GadgetTest do
       assert Kuroneko.Gadget.instances(pid) |> Enum.reject(&(&1.kind == :network)) == [
                %{kind: :keyboard, name: "keyboard"},
                %{kind: :keyboard, name: "keyboard2"},
-               %{kind: :storage, name: "boot", drives: 1},
-               %{kind: :storage, name: "disk", drives: 1}
+               %{kind: :storage, name: "boot", luns: 1},
+               %{kind: :storage, name: "disk", luns: 1}
              ]
 
       assert File.exists?(Path.join(gadget, "configs/c.1/mass_storage.boot"))
@@ -681,7 +681,7 @@ defmodule Kuroneko.GadgetTest do
       assert {:error, {:not_enough_endpoints, %{need: %{in: 8, out: 3}, have: ^have}}} =
                Kuroneko.Gadget.configure(pid, five ++ [{:storage, name: "boot"}])
 
-      # Without the network, two drives and a second network fit.
+      # Without the system's network, two storage functions and a second network fit.
       assert :ok =
                Kuroneko.Gadget.validate(
                  [

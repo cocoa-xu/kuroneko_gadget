@@ -19,9 +19,13 @@ defmodule Kuroneko.Gadget.Storage do
   the disc needs the LUN's `profile` attribute, which the Linux kernel has
   with Kuroneko's patch; without it the drive holds CDs only.
 
+  A storage function is one USB mass storage device with one or more
+  logical units (LUNs), as the kernel calls them, each a drive the target
+  computer sees: `{:storage, luns: 3}` in `Kuroneko.Gadget` makes three.
+
   The functions take a `:gadget` option, `Kuroneko.Gadget.default_gadget/0`
   by default, `:storage`, the storage function's name (`"disk"`, the one
-  `:storage` makes, by default), and `:drive`, the drive in it: 0, the
+  `:storage` makes, by default), and `:lun`, the logical unit in it: 0, the
   first, by default.
   """
 
@@ -42,7 +46,7 @@ defmodule Kuroneko.Gadget.Storage do
           | {:read_only, boolean()}
           | {:gadget, Path.t()}
           | {:storage, String.t()}
-          | {:drive, non_neg_integer()}
+          | {:lun, non_neg_integer()}
 
   @doc """
   Puts an image in the drive, in place of the one there.
@@ -75,11 +79,11 @@ defmodule Kuroneko.Gadget.Storage do
   end
 
   @doc """
-  The number of drives the storage function has (`:storage`, the default
-  one without it), 0 without the function.
+  The number of logical units the storage function has (`:storage`, the
+  default one without it), 0 without the function.
   """
-  @spec drives(keyword()) :: non_neg_integer()
-  def drives(opts \\ []) do
+  @spec luns(keyword()) :: non_neg_integer()
+  def luns(opts \\ []) do
     dir = Kuroneko.Gadget.function_dir(:storage, Keyword.put(opts, :name, opts[:storage]))
 
     case File.ls(dir) do
@@ -90,12 +94,12 @@ defmodule Kuroneko.Gadget.Storage do
 
   @doc """
   The image in each drive of the storage function, `nil` for an empty one,
-  in the order of the drives.
+  in the order of the logical units.
   """
   @spec media(keyword()) :: [medium() | nil]
   def media(opts \\ []) do
-    for drive <- 0..(drives(opts) - 1)//1 do
-      case medium(Keyword.put(opts, :drive, drive)) do
+    for lun <- 0..(luns(opts) - 1)//1 do
+      case medium(Keyword.put(opts, :lun, lun)) do
         {:ok, medium} -> medium
         {:error, _reason} -> nil
       end
@@ -176,11 +180,11 @@ defmodule Kuroneko.Gadget.Storage do
     end
   end
 
-  # The drive's LUN in the storage function: `:storage` names the function,
-  # `:drive` the drive in it, the first by default.
+  # The LUN's directory in the storage function: `:storage` names the
+  # function, `:lun` the logical unit in it, the first by default.
   defp lun(opts) do
     dir = Kuroneko.Gadget.function_dir(:storage, Keyword.put(opts, :name, opts[:storage]))
-    Path.join(dir, "lun.#{Keyword.get(opts, :drive, 0)}")
+    Path.join(dir, "lun.#{Keyword.get(opts, :lun, 0)}")
   end
 
   defp check_lun(lun) do

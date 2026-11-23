@@ -4,10 +4,11 @@
 
 * Several functions of a kind, each with a name: two storage functions,
   two networks, two keyboards; `Kuroneko.Gadget.instances/1` tells them
-* A storage function with several drives, `{:storage, drives: 3}`, up to 16
-  on the endpoints of one; a change of their number keeps the media of the
-  drives that stay. `Kuroneko.Gadget.Storage` takes `:storage` and `:drive`
-  for a drive, and tells them all with `drives/1` and `media/1`
+* A storage function with several logical units, the kernel's LUNs, each a
+  drive the target sees: `{:storage, luns: 3}`, up to 16 on the endpoints of
+  one; a change of their number keeps the media of the LUNs that stay.
+  `Kuroneko.Gadget.Storage` takes `:storage` and `:lun` for one, and tells
+  them all with `luns/1` and `media/1`
 * Network functions as KVM functions when asked for with `:network`, other
   networks with addresses that stay across boots
 * The device controller's endpoints as a budget, `:endpoints`, and
