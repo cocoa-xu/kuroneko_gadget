@@ -15,6 +15,11 @@ defmodule Kuroneko.Gadget.Serial do
 
   Each port takes two IN endpoints and one OUT. Several have their names:
   `{Kuroneko.Gadget.Serial, name: "console"}`.
+
+  The device's end is a terminal in line mode at first, as Linux makes
+  them. Read it with a port program, such as `Circuits.UART`: a blocking
+  `File` read holds one of the VM's dirty I/O schedulers until data comes,
+  and nothing calls it off.
   """
   @behaviour Kuroneko.Gadget.Function
 
