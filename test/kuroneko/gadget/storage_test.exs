@@ -9,7 +9,9 @@ defmodule Kuroneko.Gadget.StorageTest do
     gadget = Path.join(tmp_dir, "gadget")
     lun = Path.join(gadget, "functions/mass_storage.disk/lun.0")
     File.mkdir_p!(lun)
-    for attribute <- ["file", "cdrom", "ro"], do: File.write!(Path.join(lun, attribute), "")
+
+    for attribute <- ["file", "cdrom", "profile", "ro"],
+        do: File.write!(Path.join(lun, attribute), "")
 
     iso = Path.join(tmp_dir, "install.ISO")
     disk = Path.join(tmp_dir, "disk.img")
@@ -19,14 +21,32 @@ defmodule Kuroneko.Gadget.StorageTest do
     %{gadget: gadget, lun: lun, iso: iso, disk: disk}
   end
 
-  test "an ISO image is a read-only CD-ROM", %{gadget: gadget, iso: iso} do
+  test "an ISO image is a read-only DVD unless asked", %{gadget: gadget, lun: lun, iso: iso} do
     assert :ok = Storage.insert(iso, gadget: gadget)
-    assert Storage.medium(gadget: gadget) == {:ok, %{image: iso, cdrom: true, read_only: true}}
+
+    assert Storage.medium(gadget: gadget) ==
+             {:ok, %{image: iso, cdrom: true, disc: :dvd, read_only: true}}
+
+    assert :ok = Storage.insert(iso, gadget: gadget, disc: :bd)
+    assert File.read!(Path.join(lun, "profile")) == "bd"
+    assert {:ok, %{disc: :bd}} = Storage.medium(gadget: gadget)
+
+    assert :ok = Storage.insert(iso, gadget: gadget, disc: :cd)
+    assert {:ok, %{disc: :cd}} = Storage.medium(gadget: gadget)
+  end
+
+  test "only CDs without the kernel's profile attribute", %{gadget: gadget, lun: lun, iso: iso} do
+    File.rm!(Path.join(lun, "profile"))
+    assert :ok = Storage.insert(iso, gadget: gadget)
+    assert {:ok, %{disc: :cd}} = Storage.medium(gadget: gadget)
+    assert Storage.insert(iso, gadget: gadget, disc: :dvd) == {:error, :disc_unsupported}
   end
 
   test "another image is a writable disk unless asked", %{gadget: gadget, disk: disk} do
     assert :ok = Storage.insert(disk, gadget: gadget)
-    assert Storage.medium(gadget: gadget) == {:ok, %{image: disk, cdrom: false, read_only: false}}
+
+    assert Storage.medium(gadget: gadget) ==
+             {:ok, %{image: disk, cdrom: false, disc: nil, read_only: false}}
 
     assert :ok = Storage.insert(disk, gadget: gadget, read_only: true)
     assert {:ok, %{read_only: true}} = Storage.medium(gadget: gadget)

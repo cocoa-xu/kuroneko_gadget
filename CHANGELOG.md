@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+* `Kuroneko.Gadget.Storage`: the optical drive holds a CD, a DVD or a BD
+  (`disc:`, a DVD by default), so that images over 2.3 GB, which a CD
+  cannot address, go in whole. It needs the kernel's `profile` attribute
+  on the LUN; without it the drive holds CDs, as before
+
 ## v0.1.0 (2026-11-21)
 
 First version, moved out of `nano_kvm_go` (where it was `NanoKVMGo.USB`,
