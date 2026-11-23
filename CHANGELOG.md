@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+* Functions of your own: a module of `Kuroneko.Gadget.Function` goes in
+  the functions as the built-in kinds do, `MyFunction` or `{MyFunction,
+  name: "x", ...}`, with its endpoints counted, its instances told apart on
+  the gadget, made again when their settings change, and readied before
+  the gadget connects
+* A serial port to the target computer, `Kuroneko.Gadget.Serial` (USB CDC
+  ACM), the first of them
+
 ## v0.3.0 (2026-11-23)
 
 * CDs whose image keeps the sectors as the disc has them, a CUE sheet's

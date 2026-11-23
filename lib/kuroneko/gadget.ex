@@ -22,6 +22,10 @@ defmodule Kuroneko.Gadget do
     * `:microphone` - a microphone the target computer records from
     * `:speaker` - a speaker the target computer plays to
 
+  Functions of other kinds come from modules of `Kuroneko.Gadget.Function`,
+  such as `Kuroneko.Gadget.Serial`, a serial port: the module, or `{module,
+  options}` with its options and a `:name`, among the functions.
+
   There may be several functions of a kind, each with a `:name`:
   `[:storage, {:storage, name: "boot"}]` are two storage functions, which the
   target sees as two devices, each with its own LUN 0. Without a name a function is its kind's first:
@@ -31,8 +35,8 @@ defmodule Kuroneko.Gadget do
 
   Each function takes endpoints of the device controller, which has few:
   HID functions one IN, a storage function one IN and one OUT, a network
-  function two IN and one OUT, the microphone one IN, the speaker one OUT
-  (`endpoints/1`). With the `:endpoints` option, the functions asked for
+  function two IN and one OUT, the microphone one IN, the speaker one OUT, a
+  module's function what the module says (`endpoints/1`). With the `:endpoints` option, the functions asked for
   must fit, or `configure/2` says how many they need and how many there are.
 
   The microphone and the speaker are the two directions of one USB Audio
@@ -117,6 +121,7 @@ defmodule Kuroneko.Gadget do
   require Logger
   import Bitwise
 
+  alias Kuroneko.Gadget.Function, as: ModuleFunction
   alias Kuroneko.Gadget.HID.Descriptor
 
   @config "configs/c.1"
@@ -190,6 +195,9 @@ defmodule Kuroneko.Gadget do
   # The network function's settings that a new one takes over.
   @network_kept [:qmult, :max_segment_size]
 
+  # A function of a module of Kuroneko.Gadget.Function, by its kind.
+  defguardp is_module_kind(kind) when is_atom(kind) and not is_map_key(@types, kind)
+
   @type function_name() ::
           :keyboard | :mouse | :relative_mouse | :storage | :network | :microphone | :speaker
 
@@ -206,6 +214,8 @@ defmodule Kuroneko.Gadget do
           | {:mouse, [mode: Kuroneko.Gadget.HID.pointer_mode(), name: String.t()]}
           | {:storage, [luns: 1..16, name: String.t()]}
           | {:keyboard | :relative_mouse | :network, [name: String.t()]}
+          | module()
+          | {module(), keyword()}
 
   @typedoc "A function on the gadget, see `instances/1`."
   @type instance() :: %{
@@ -327,19 +337,21 @@ defmodule Kuroneko.Gadget do
   @doc """
   The kinds of KVM functions the gadget has, each once.
   """
-  @spec functions(GenServer.server()) :: [function_name()]
+  @spec functions(GenServer.server()) :: [function_name() | module()]
   def functions(server \\ __MODULE__), do: GenServer.call(server, :functions)
 
   @doc """
   The functions on the gadget that this module knows, each with its kind and
   name, as `configure/2` takes them back. A network also has its interface
-  on the device (`nil` before the gadget is first bound) and its addresses:
+  on the device (`nil` before the gadget is first bound) and its addresses,
+  a module's function its settings and endpoints:
 
       [%{kind: :network, name: "usb0", interface: "usb0",
          device_address: "9e:9f:51:11:f7:b2", host_address: "7a:78:1f:1f:1d:dd"},
        %{kind: :keyboard, name: "keyboard"},
        %{kind: :storage, name: "disk", luns: 2},
-       %{kind: :audio, name: "audio", microphone: %{channels: 2, ...}, speaker: nil}]
+       %{kind: :audio, name: "audio", microphone: %{channels: 2, ...}, speaker: nil},
+       %{kind: Kuroneko.Gadget.Serial, name: "serial", settings: %{}, endpoints: {2, 1}}]
   """
   @spec instances(GenServer.server()) :: [instance()]
   def instances(server \\ __MODULE__), do: GenServer.call(server, :instances)
@@ -351,6 +363,8 @@ defmodule Kuroneko.Gadget do
 
       iex> Kuroneko.Gadget.endpoints([:keyboard, :mouse, {:storage, luns: 4}, :network])
       {:ok, %{in: 5, out: 2}}
+      iex> Kuroneko.Gadget.endpoints([:keyboard, Kuroneko.Gadget.Serial])
+      {:ok, %{in: 3, out: 1}}
   """
   @spec endpoints([function_spec()]) ::
           {:ok, %{in: non_neg_integer(), out: non_neg_integer()}} | {:error, term()}
@@ -555,11 +569,11 @@ defmodule Kuroneko.Gadget do
   @doc false
   # A function's directory: `:name` picks the instance, the kind's default
   # one without it.
-  @spec function_dir(function_name(), keyword()) :: Path.t()
+  @spec function_dir(function_name() | module(), keyword()) :: Path.t()
   def function_dir(function, opts) do
     gadget = Keyword.get_lazy(opts, :gadget, &default_gadget/0)
-    name = Keyword.get(opts, :name) || @default_names[function]
-    Path.join([gadget, "functions", "#{@types[function]}.#{name}"])
+    name = Keyword.get(opts, :name) || default_name(function)
+    Path.join([gadget, "functions", "#{type(function)}.#{name}"])
   end
 
   @impl GenServer
@@ -591,30 +605,40 @@ defmodule Kuroneko.Gadget do
       # function goes (configfs takes its attributes with it, a plain
       # directory does not).
       udc_class: Keyword.get(opts, :udc_class, @udc_class),
-      rmdir: Keyword.get(opts, :rmdir, &File.rmdir/1)
+      rmdir: Keyword.get(opts, :rmdir, &File.rmdir/1),
+      # The functions of modules set up, by their directories.
+      modules: %{}
     }
 
-    with {:error, reason} <- apply_functions(state, functions) do
-      Logger.error(
-        "kuroneko_gadget: USB functions #{inspect(functions)} not set up: #{inspect(reason)}"
-      )
-    end
+    case apply_functions(state, functions) do
+      {:ok, modules} ->
+        {:ok, %{state | modules: modules}}
 
-    {:ok, state}
+      {:error, reason} ->
+        Logger.error(
+          "kuroneko_gadget: USB functions #{inspect(functions)} not set up: #{inspect(reason)}"
+        )
+
+        {:ok, state}
+    end
   end
 
   @impl GenServer
   def handle_call({:configure, functions}, _from, state) do
     case apply_functions(state, functions) do
-      :ok -> {:reply, :ok, %{state | network_managed: managing_networks?(state, functions)}}
-      error -> {:reply, error, state}
+      {:ok, modules} ->
+        {:reply, :ok,
+         %{state | network_managed: managing_networks?(state, functions), modules: modules}}
+
+      error ->
+        {:reply, error, state}
     end
   end
 
   def handle_call(:functions, _from, state) do
     kinds =
       state
-      |> managed(present(state.gadget))
+      |> managed(present(state))
       |> Enum.flat_map(fn
         %{kind: :audio} = audio -> Enum.filter(@audio, &audio[&1])
         %{kind: kind} -> [kind]
@@ -625,14 +649,14 @@ defmodule Kuroneko.Gadget do
   end
 
   def handle_call(:instances, _from, state),
-    do: {:reply, Enum.map(present(state.gadget), &with_details(state, &1)), state}
+    do: {:reply, Enum.map(present(state), &with_details(state, &1)), state}
 
   def handle_call(:endpoints_in_use, _from, state),
-    do: {:reply, Map.put(count_endpoints(present(state.gadget)), :have, state.endpoints), state}
+    do: {:reply, Map.put(count_endpoints(present(state)), :have, state.endpoints), state}
 
   def handle_call(:audio, _from, state) do
     audio =
-      case Enum.find(present(state.gadget), &match?(%{kind: :audio, name: "audio"}, &1)) do
+      case Enum.find(present(state), &match?(%{kind: :audio, name: "audio"}, &1)) do
         nil ->
           %{}
 
@@ -820,13 +844,12 @@ defmodule Kuroneko.Gadget do
 
     rank = fn {name, function} ->
       kind =
-        case instance_of(function) do
+        case instance_of(function, state.modules) do
           [%{kind: kind}] -> kind
           [] -> nil
         end
 
-      {if(name == state.network.function, do: 0, else: 1),
-       Enum.find_index(@order, &(&1 == kind)) || length(@order), name}
+      {if(name == state.network.function, do: 0, else: 1), rank(kind), name}
     end
 
     case File.ls(config) do
@@ -899,13 +922,12 @@ defmodule Kuroneko.Gadget do
          :ok <- check_gadget(state.gadget),
          {present, others} =
            Enum.split_with(
-             present(state.gadget),
+             present(state, wanted),
              &(managing_networks?(state, functions) or &1.kind != :network)
            ),
-         :ok <- check_endpoints(wanted ++ others, state.endpoints) do
-      if wanted == present,
-        do: :ok,
-        else: change(state, present, wanted)
+         :ok <- check_endpoints(wanted ++ others, state.endpoints),
+         :ok <- if(wanted == present, do: :ok, else: change(state, present, wanted)) do
+      {:ok, modules(wanted)}
     end
   end
 
@@ -948,7 +970,9 @@ defmodule Kuroneko.Gadget do
       )
 
       now =
-        state |> managed(present(state.gadget)) |> Enum.filter(&(&1 in present or &1 in wanted))
+        state
+        |> managed(present(state, wanted))
+        |> Enum.filter(&(&1 in present or &1 in wanted))
 
       _ = switch(state, udc, now, present)
       {:error, reason}
@@ -967,20 +991,23 @@ defmodule Kuroneko.Gadget do
          :ok <- each(from -- to, &remove(state, &1)),
          :ok <- each(to -- from, &add(state, &1, kept)),
          # Bus powered, and the keyboard and mice may wake the target.
-         :ok <- write_existing(Path.join(state.gadget, @config), bmAttributes: "0xa0") do
+         :ok <- write_existing(Path.join(state.gadget, @config), bmAttributes: "0xa0"),
+         :ok <- each(to, &ready(state, &1)) do
       bind(state, udc)
     end
   end
 
-  # The functions in the configuration that this module knows, in order.
-  defp present(gadget) do
-    config = Path.join(gadget, @config)
+  # The functions in the configuration that this module knows, in order. A
+  # module's are those set up, else those asked for.
+  defp present(state, wanted \\ []) do
+    known = Map.merge(modules(wanted), state.modules)
+    config = Path.join(state.gadget, @config)
 
     case File.ls(config) do
       {:ok, names} ->
         names
         |> Enum.flat_map(&link_target(config, &1))
-        |> Enum.flat_map(fn {_name, function} -> instance_of(function) end)
+        |> Enum.flat_map(fn {_name, function} -> instance_of(function, known) end)
         |> sort()
 
       {:error, _reason} ->
@@ -988,13 +1015,42 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  defp sort(instances),
-    do:
-      Enum.sort_by(instances, &{Enum.find_index(@order, fn kind -> kind == &1.kind end), &1.name})
+  defp modules(instances) do
+    for %{kind: kind} = instance <- instances,
+        is_module_kind(kind),
+        into: %{},
+        do: {dir_name(instance), instance}
+  end
+
+  defp sort(instances), do: Enum.sort_by(instances, &{rank(&1.kind), dir_name(&1)})
+
+  defp rank(kind), do: Enum.find_index(@order, &(&1 == kind)) || length(@order)
+
+  defp instance_of(dir, modules) do
+    case Map.fetch(modules, Path.basename(dir)) do
+      {:ok, instance} -> [read_module(dir, instance)]
+      :error -> builtin_instance(dir)
+    end
+  end
+
+  # A module's function as the module reads it; one it does not take for
+  # what was set up is made again.
+  defp read_module(dir, %{kind: module} = instance) do
+    if function_exported?(module, :read, 1) do
+      with {:ok, settings} <- callback(module, :read, [dir]),
+           {:ok, endpoints} <- module_endpoints(module, settings) do
+        %{instance | settings: settings, endpoints: endpoints}
+      else
+        _other -> Map.put(instance, :changed, true)
+      end
+    else
+      instance
+    end
+  end
 
   # What a function directory is, from its type and settings. HID functions
   # are known by their report descriptors, or by the names of this module's.
-  defp instance_of(dir) do
+  defp builtin_instance(dir) do
     case String.split(Path.basename(dir), ".", parts: 2) do
       ["hid", name] -> hid_instance(dir, name)
       ["mass_storage", name] -> [%{kind: :storage, name: name, luns: max(count_luns(dir), 1)}]
@@ -1069,7 +1125,13 @@ defmodule Kuroneko.Gadget do
   defp popcount(0), do: 0
   defp popcount(n), do: (n &&& 1) + popcount(n >>> 1)
 
-  defp dir_name(%{kind: kind, name: name}), do: "#{@types[kind]}.#{name}"
+  defp dir_name(%{kind: kind, name: name}), do: "#{type(kind)}.#{name}"
+
+  defp type(kind) when is_map_key(@types, kind), do: @types[kind]
+  defp type(module), do: module.type()
+
+  defp default_name(kind) when is_map_key(@default_names, kind), do: @default_names[kind]
+  defp default_name(module), do: module.default_name()
   defp dir(gadget, instance), do: Path.join([gadget, "functions", dir_name(instance)])
   defp link_path(gadget, instance), do: Path.join([gadget, @config, dir_name(instance)])
 
@@ -1078,7 +1140,7 @@ defmodule Kuroneko.Gadget do
 
     with :ok <- File.mkdir_p(dir),
          :ok <- setup(dir, instance, state),
-         :ok <- restore_luns(dir, instance, kept[instance.name]) do
+         :ok <- restore_luns(dir, instance, kept) do
       File.ln_s(dir, link_path(state.gadget, instance))
     end
   end
@@ -1129,6 +1191,16 @@ defmodule Kuroneko.Gadget do
     end
   end
 
+  # A module's function that fails to set up goes, as it would be removed.
+  defp setup(dir, %{kind: module, settings: settings} = instance, state)
+       when is_module_kind(module) do
+    with {:error, reason} <- run(module, :setup, [dir, settings]) do
+      _ = teardown(dir, instance)
+      _ = state.rmdir.(dir)
+      {:error, reason}
+    end
+  end
+
   defp derived_addresses(gadget, name) do
     serial =
       case File.read(Path.join(gadget, "strings/0x409/serialnumber")) do
@@ -1161,11 +1233,12 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  defp restore_luns(_dir, _instance, nil), do: :ok
-
   # Every kernel has a LUN's file; the other settings where it has them.
-  defp restore_luns(dir, %{luns: luns}, kept) do
-    each(Enum.filter(kept, fn {number, _settings} -> number < luns end), fn {number, settings} ->
+  defp restore_luns(dir, %{kind: :storage, name: name, luns: luns}, kept)
+       when is_map_key(kept, name) do
+    kept = Enum.filter(kept[name], fn {number, _settings} -> number < luns end)
+
+    each(kept, fn {number, settings} ->
       lun = Path.join(dir, "lun.#{number}")
       {file, others} = Keyword.split(settings, [:file])
 
@@ -1173,6 +1246,8 @@ defmodule Kuroneko.Gadget do
            do: write_all(lun, Enum.reject(file, &match?({:file, ""}, &1)))
     end)
   end
+
+  defp restore_luns(_dir, _instance, _kept), do: :ok
 
   # SCSI INQUIRY: vendor (8), product (16), revision (4), padded.
   defp inquiry(vendor, product, revision),
@@ -1225,10 +1300,28 @@ defmodule Kuroneko.Gadget do
       for number <- (count_luns(dir) - 1)..1//-1, do: Path.join(dir, "lun.#{number}")
 
     with :ok <- File.rm(link_path(state.gadget, instance)),
-         :ok <- each(extra_luns, state.rmdir) do
+         :ok <- each(extra_luns, state.rmdir),
+         :ok <- teardown(dir, instance) do
       state.rmdir.(dir)
     end
   end
+
+  defp ready(state, %{kind: module, settings: settings} = instance)
+       when is_module_kind(module) do
+    if function_exported?(module, :ready, 2),
+      do: run(module, :ready, [dir(state.gadget, instance), settings]),
+      else: :ok
+  end
+
+  defp ready(_state, _instance), do: :ok
+
+  defp teardown(dir, %{kind: module, settings: settings}) when is_module_kind(module) do
+    if function_exported?(module, :teardown, 2),
+      do: run(module, :teardown, [dir, settings]),
+      else: :ok
+  end
+
+  defp teardown(_dir, _instance), do: :ok
 
   defp bound_udc(gadget) do
     case File.read(Path.join(gadget, "UDC")) do
@@ -1293,7 +1386,74 @@ defmodule Kuroneko.Gadget do
       else: {:error, {:invalid_name, kind, name}}
   end
 
+  defp entry(module, _max_packet) when is_module_kind(module),
+    do: module_entry(module, module, [])
+
+  defp entry({module, opts} = spec, _max_packet) when is_module_kind(module) and is_list(opts),
+    do: module_entry(spec, module, opts)
+
   defp entry(other, _max_packet), do: {:error, {:unknown_function, other}}
+
+  defp module_entry(spec, module, opts) do
+    with true <- ModuleFunction.function?(module) || {:error, {:unknown_function, spec}},
+         true <- Keyword.keyword?(opts) || {:error, {:invalid_options, module, opts}},
+         :ok <- module_type(module),
+         {name, opts} =
+           Keyword.pop_lazy(opts, :name, fn -> callback(module, :default_name, []) end),
+         true <- valid_name?(name) || {:error, {:invalid_name, module, name}},
+         {:ok, settings} <- module_settings(module, opts),
+         {:ok, endpoints} <- module_endpoints(module, settings) do
+      {:ok, %{kind: module, name: name, settings: settings, endpoints: endpoints}}
+    end
+  end
+
+  # configfs function types are letters, digits and "_".
+  defp module_type(module) do
+    case callback(module, :type, []) do
+      type when is_binary(type) ->
+        if String.match?(type, ~r/^[A-Za-z0-9_]+$/),
+          do: :ok,
+          else: {:error, {:invalid_type, module, type}}
+
+      other ->
+        {:error, {:invalid_type, module, other}}
+    end
+  end
+
+  defp module_settings(module, opts) do
+    case callback(module, :settings, [opts]) do
+      {:ok, settings} -> {:ok, settings}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {module, :settings, {:bad_return, other}}}
+    end
+  end
+
+  defp module_endpoints(module, settings) do
+    case callback(module, :endpoints, [settings]) do
+      {ins, outs} when is_integer(ins) and ins >= 0 and is_integer(outs) and outs >= 0 ->
+        {:ok, {ins, outs}}
+
+      other ->
+        {:error, {module, :endpoints, {:bad_return, other}}}
+    end
+  end
+
+  defp run(module, name, args) do
+    case callback(module, name, args) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {module, name, {:bad_return, other}}}
+    end
+  end
+
+  # A module's callback, its exceptions and exits as errors.
+  defp callback(module, name, args) do
+    apply(module, name, args)
+  rescue
+    exception -> {:error, {module, name, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {module, name, {kind, reason}}}
+  end
 
   defp kind_entry(:mouse, name, opts, _max_packet) do
     case Keyword.pop(opts, :mode, :absolute) do
@@ -1367,7 +1527,7 @@ defmodule Kuroneko.Gadget do
 
   defp duplicate_kind(instances, dir) do
     case Enum.find(instances, &(dir_name(&1) == dir)) do
-      %{kind: kind, name: name} -> if name == @default_names[kind], do: kind, else: {kind, name}
+      %{kind: kind, name: name} -> if name == default_name(kind), do: kind, else: {kind, name}
     end
   end
 
@@ -1379,6 +1539,7 @@ defmodule Kuroneko.Gadget do
     end)
   end
 
+  defp endpoint_cost(%{kind: kind, endpoints: endpoints}) when is_module_kind(kind), do: endpoints
   defp endpoint_cost(%{kind: kind}) when kind in @hid, do: {1, 0}
   defp endpoint_cost(%{kind: :storage}), do: {1, 1}
   defp endpoint_cost(%{kind: :network}), do: {2, 1}
