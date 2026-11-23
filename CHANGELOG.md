@@ -13,6 +13,8 @@
   asks the target to eject it, as an optical drive's button does (the
   kernel's `eject_request`), and gives it `:wait` milliseconds; then it is
   forced out and the target sees the drive anew
+* `manage_networks: true` puts the network functions always in hand, so
+  that functions without one remove them all
 
 ## v0.2.0 (2026-11-23)
 

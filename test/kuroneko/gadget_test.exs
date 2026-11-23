@@ -673,6 +673,21 @@ defmodule Kuroneko.GadgetTest do
       assert Kuroneko.Gadget.functions(pid) == [:network]
     end
 
+    test "networks always in hand: none at all is none", %{gadget: gadget, udc_class: udc_class} do
+      pid =
+        start_supervised!(
+          {Kuroneko.Gadget,
+           gadget: gadget, udc_class: udc_class, rmdir: &rm_rf/1, manage_networks: true, name: nil}
+        )
+
+      assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard, :storage])
+      refute File.exists?(Path.join(gadget, "configs/c.1/ncm.usb0"))
+      assert Kuroneko.Gadget.functions(pid) == [:keyboard, :storage]
+
+      assert :ok = Kuroneko.Gadget.configure(pid, [:network, :keyboard])
+      assert File.exists?(Path.join(gadget, "configs/c.1/ncm.usb0"))
+    end
+
     test "as many endpoints as the controller has", %{gadget: gadget, udc_class: udc_class} do
       have = %{in: 7, out: 7}
 

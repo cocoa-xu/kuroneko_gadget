@@ -76,9 +76,10 @@ defmodule Kuroneko.Gadget do
   them for the next boots.
 
   The functions take network functions in hand only when they include a
-  `:network`: then `[:network, {:network, name: "usb1"}]` keeps the system's
-  network and adds a second, whose interface the kernel names, and a list
-  without the system's network removes it. Another network's addresses are
+  `:network`, or always with `manage_networks: true`: then `[:network,
+  {:network, name: "usb1"}]` keeps the system's network and adds a second,
+  whose interface the kernel names, and a list without the system's network
+  removes it, one without any network all of them. Another network's addresses are
   made from the gadget's serial number and the function's name, the same at
   each boot; the system's network, made again, takes the default addresses.
 
@@ -97,6 +98,9 @@ defmodule Kuroneko.Gadget do
       names for those left out: `:audio` (the sound card), `:microphone`,
       `:speaker`, and `:storage` (the drive) as `{vendor, product,
       revision}` of up to 8, 16 and 4 ASCII characters
+    * `:manage_networks` - whether the network functions are always this
+      module's, so that functions without one remove them all; by default
+      only when the functions include one
     * `:network` - the network function:
       * `:function` - its configfs directory, `"ncm.usb0"` by default
       * `:default_addresses` - the addresses `:default` stands for in
@@ -575,7 +579,8 @@ defmodule Kuroneko.Gadget do
       gadget: Keyword.get_lazy(opts, :gadget, &default_gadget/0),
       max_packet: max_packet,
       endpoints: Keyword.get(opts, :endpoints),
-      network_managed: network?(functions),
+      manage_networks: Keyword.get(opts, :manage_networks, false),
+      network_managed: Keyword.get(opts, :manage_networks, false) or network?(functions),
       names: Map.new(names),
       network: %{
         function: Keyword.get(network, :function, "ncm.usb0"),
@@ -601,7 +606,7 @@ defmodule Kuroneko.Gadget do
   @impl GenServer
   def handle_call({:configure, functions}, _from, state) do
     case apply_functions(state, functions) do
-      :ok -> {:reply, :ok, %{state | network_managed: network?(functions)}}
+      :ok -> {:reply, :ok, %{state | network_managed: managing_networks?(state, functions)}}
       error -> {:reply, error, state}
     end
   end
@@ -893,7 +898,10 @@ defmodule Kuroneko.Gadget do
     with {:ok, wanted} <- normalize(functions, state.max_packet),
          :ok <- check_gadget(state.gadget),
          {present, others} =
-           Enum.split_with(present(state.gadget), &(network?(functions) or &1.kind != :network)),
+           Enum.split_with(
+             present(state.gadget),
+             &(managing_networks?(state, functions) or &1.kind != :network)
+           ),
          :ok <- check_endpoints(wanted ++ others, state.endpoints) do
       if wanted == present,
         do: :ok,
@@ -924,6 +932,8 @@ defmodule Kuroneko.Gadget do
   # The KVM functions: the network ones only when they are managed.
   defp managed(state, instances),
     do: Enum.filter(instances, &(state.network_managed or &1.kind != :network))
+
+  defp managing_networks?(state, functions), do: state.manage_networks or network?(functions)
 
   defp network?(functions),
     do: Enum.any?(functions, &(&1 == :network or match?({:network, _}, &1)))
