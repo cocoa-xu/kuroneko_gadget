@@ -28,7 +28,7 @@ NanoKVM-Go.
 ```elixir
 def deps do
   [
-    {:kuroneko_gadget, github: "cocoa-xu/kuroneko_gadget", tag: "v0.2.0"}
+    {:kuroneko_gadget, github: "cocoa-xu/kuroneko_gadget", tag: "v0.3.0"}
   ]
 end
 ```
@@ -37,6 +37,11 @@ The system sets up the gadget at boot and binds it to the device controller,
 as the NanoKVM-Go's Nerves system does. Its kernel needs configfs gadgets
 with the functions you use: `CONFIG_USB_CONFIGFS_F_HID`,
 `CONFIG_USB_CONFIGFS_MASS_STORAGE`, `CONFIG_USB_CONFIGFS_F_UAC2`.
+DVDs and BDs, CDs of tracks (audio and mixed-mode CDs from CUE sheets) and
+asking the target to eject a disc need the mass storage function's
+`profile`, `tracks` and `eject_request` attributes, which Kuroneko's kernel
+(`cocoa-xu/linux-ax620e`) adds; without them its optical drive holds CDs of
+one data track.
 
 ## Usage
 

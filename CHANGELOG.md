@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 (2026-11-23)
 
 * CDs whose image keeps the sectors as the disc has them, a CUE sheet's
   BIN: `Kuroneko.Gadget.Storage.insert/2` takes their `:tracks`, audio and
