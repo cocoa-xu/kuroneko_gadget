@@ -695,6 +695,9 @@ defmodule Kuroneko.GadgetTest do
                )
 
       assert Kuroneko.Gadget.endpoints([:network, :storage, :speaker]) == {:ok, %{in: 3, out: 3}}
+
+      # The system's network and the five, the microphone without the speaker.
+      assert Kuroneko.Gadget.endpoints_in_use(pid) == %{in: 7, out: 2, have: have}
     end
   end
 end

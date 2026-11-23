@@ -353,6 +353,21 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc """
+  The endpoints the gadget's functions take now, the network functions this
+  module leaves alone among them, and those the controller has (the
+  `:endpoints` option, `nil` without it):
+
+      Kuroneko.Gadget.endpoints_in_use()
+      #=> %{in: 7, out: 3, have: %{in: 7, out: 7}}
+  """
+  @spec endpoints_in_use(GenServer.server()) :: %{
+          in: non_neg_integer(),
+          out: non_neg_integer(),
+          have: %{in: non_neg_integer(), out: non_neg_integer()} | nil
+        }
+  def endpoints_in_use(server \\ __MODULE__), do: GenServer.call(server, :endpoints_in_use)
+
+  @doc """
   The formats of the audio directions of the sound card named `"audio"`,
   the default one, such as `%{microphone: %{channels: 2, rates: [48_000],
   sample_bits: 16}}`. `instances/1` tells those of any sound card.
@@ -576,6 +591,9 @@ defmodule Kuroneko.Gadget do
   end
 
   def handle_call(:instances, _from, state), do: {:reply, present(state.gadget), state}
+
+  def handle_call(:endpoints_in_use, _from, state),
+    do: {:reply, Map.put(count_endpoints(present(state.gadget)), :have, state.endpoints), state}
 
   def handle_call(:audio, _from, state) do
     audio =

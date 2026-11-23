@@ -12,7 +12,8 @@
 * Network functions as KVM functions when asked for with `:network`, other
   networks with addresses that stay across boots
 * The device controller's endpoints as a budget, `:endpoints`, and
-  `Kuroneko.Gadget.endpoints/1`
+  `Kuroneko.Gadget.endpoints/1`; `endpoints_in_use/1` tells how many the
+  gadget's functions take now
 * `Kuroneko.Gadget.Storage`: the optical drive holds a CD, a DVD or a BD
   (`disc:`, a DVD by default), so that images over 2.3 GB, which a CD
   cannot address, go in whole. It needs the kernel's `profile` attribute
