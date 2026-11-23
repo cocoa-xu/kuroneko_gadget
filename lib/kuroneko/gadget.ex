@@ -593,31 +593,8 @@ defmodule Kuroneko.Gadget do
     {:reply, kinds, state}
   end
 
-  def handle_call(:instances, _from, state) do
-    instances =
-      Enum.map(present(state.gadget), fn
-        %{kind: :network} = network ->
-          dir = dir(state.gadget, network)
-
-          address = fn attribute ->
-            case read_address(dir, attribute) do
-              {:ok, address} -> address
-              {:error, _reason} -> nil
-            end
-          end
-
-          Map.merge(network, %{
-            interface: read_interface(dir),
-            device_address: address.("dev_addr"),
-            host_address: address.("host_addr")
-          })
-
-        instance ->
-          instance
-      end)
-
-    {:reply, instances, state}
-  end
+  def handle_call(:instances, _from, state),
+    do: {:reply, Enum.map(present(state.gadget), &with_details(state, &1)), state}
 
   def handle_call(:endpoints_in_use, _from, state),
     do: {:reply, Map.put(count_endpoints(present(state.gadget)), :have, state.endpoints), state}
@@ -885,17 +862,36 @@ defmodule Kuroneko.Gadget do
     end
   end
 
+  # The network functions left alone count against the endpoints too.
   defp apply_functions(state, functions) do
     with {:ok, wanted} <- normalize(functions, state.max_packet),
-         :ok <- check_gadget(state.gadget) do
-      all = present(state.gadget)
-      {present, others} = Enum.split_with(all, &(network?(functions) or &1.kind != :network))
+         :ok <- check_gadget(state.gadget),
+         {present, others} =
+           Enum.split_with(present(state.gadget), &(network?(functions) or &1.kind != :network)),
+         :ok <- check_endpoints(wanted ++ others, state.endpoints) do
+      if wanted == present,
+        do: :ok,
+        else: change(state, present, wanted)
+    end
+  end
 
-      with :ok <- check_endpoints(wanted ++ others, state.endpoints) do
-        if wanted == present,
-          do: :ok,
-          else: change(state, present, wanted)
-      end
+  # A network with its interface and addresses.
+  defp with_details(state, %{kind: :network} = network) do
+    dir = dir(state.gadget, network)
+
+    Map.merge(network, %{
+      interface: read_interface(dir),
+      device_address: address_or_nil(dir, "dev_addr"),
+      host_address: address_or_nil(dir, "host_addr")
+    })
+  end
+
+  defp with_details(_state, instance), do: instance
+
+  defp address_or_nil(dir, attribute) do
+    case read_address(dir, attribute) do
+      {:ok, address} -> address
+      {:error, _reason} -> nil
     end
   end
 
@@ -979,26 +975,29 @@ defmodule Kuroneko.Gadget do
         {:error, _reason} -> nil
       end
 
-    cond do
-      report_desc == Descriptor.keyboard().report_desc ->
-        [%{kind: :keyboard, name: name}]
-
-      report_desc == Descriptor.relative_mouse().report_desc ->
-        [%{kind: :relative_mouse, name: name}]
-
-      mode = report_desc && Descriptor.pointer_mode(report_desc) ->
-        [%{kind: :mouse, name: name, mode: mode}]
-
-      name == "mouse" ->
-        [%{kind: :mouse, name: name, mode: nil}]
-
-      name in ["keyboard", "relative_mouse"] ->
-        [%{kind: String.to_existing_atom(name), name: name}]
-
-      true ->
-        []
+    case hid_kind(report_desc) || default_hid(name) do
+      nil -> []
+      {kind, extra} -> [Map.merge(%{kind: kind, name: name}, extra)]
     end
   end
+
+  # A HID function by its report descriptor.
+  defp hid_kind(nil), do: nil
+
+  defp hid_kind(report_desc) do
+    cond do
+      report_desc == Descriptor.keyboard().report_desc -> {:keyboard, %{}}
+      report_desc == Descriptor.relative_mouse().report_desc -> {:relative_mouse, %{}}
+      mode = Descriptor.pointer_mode(report_desc) -> {:mouse, %{mode: mode}}
+      true -> nil
+    end
+  end
+
+  # One of this module's by its default name, whatever its descriptor.
+  defp default_hid("mouse"), do: {:mouse, %{mode: nil}}
+  defp default_hid("keyboard"), do: {:keyboard, %{}}
+  defp default_hid("relative_mouse"), do: {:relative_mouse, %{}}
+  defp default_hid(_name), do: nil
 
   defp audio_instance(dir, name) do
     directions =
