@@ -552,4 +552,149 @@ defmodule Kuroneko.GadgetTest do
     assert Kuroneko.Gadget.functions(pid) == []
     assert Kuroneko.Gadget.configure(pid, [:storage]) == {:error, {:no_gadget, missing}}
   end
+
+  describe "several of a kind" do
+    # configfs takes a function's attributes and drives with it.
+    defp rm_rf(dir) do
+      File.rm_rf!(dir)
+      :ok
+    end
+
+    test "a storage function with several drives keeps their media when it changes", %{
+      gadget: gadget,
+      udc_class: udc_class
+    } do
+      pid =
+        start_supervised!(
+          {Kuroneko.Gadget,
+           functions: [{:storage, drives: 2}],
+           gadget: gadget,
+           udc_class: udc_class,
+           rmdir: &rm_rf/1,
+           name: nil}
+        )
+
+      for drive <- 0..1,
+          do:
+            assert(
+              FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.#{drive}/removable") ==
+                "1"
+            )
+
+      lun1 = Path.join(gadget, "functions/mass_storage.disk/lun.1")
+      File.write!(Path.join(lun1, "cdrom"), "1")
+      File.write!(Path.join(lun1, "file"), "/data/images/debian.iso\n")
+
+      assert :ok = Kuroneko.Gadget.configure(pid, [{:storage, drives: 3}])
+
+      assert [%{kind: :network, name: "usb0"}, %{kind: :storage, name: "disk", drives: 3}] =
+               Kuroneko.Gadget.instances(pid)
+
+      assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.1/cdrom") == "1"
+
+      assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.1/file") ==
+               "/data/images/debian.iso"
+
+      assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.2/cdrom") == "0"
+
+      assert {:error, {:invalid_drives, 17}} =
+               Kuroneko.Gadget.configure(pid, [{:storage, drives: 17}])
+    end
+
+    test "functions of a kind by their names", %{gadget: gadget, udc_class: udc_class} do
+      pid = start_supervised!({Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, name: nil})
+
+      assert :ok =
+               Kuroneko.Gadget.configure(pid, [
+                 :storage,
+                 {:storage, name: "boot"},
+                 :keyboard,
+                 {:keyboard, name: "keyboard2"}
+               ])
+
+      assert Kuroneko.Gadget.functions(pid) == [:keyboard, :storage]
+
+      assert Kuroneko.Gadget.instances(pid) |> Enum.reject(&(&1.kind == :network)) == [
+               %{kind: :keyboard, name: "keyboard"},
+               %{kind: :keyboard, name: "keyboard2"},
+               %{kind: :storage, name: "boot", drives: 1},
+               %{kind: :storage, name: "disk", drives: 1}
+             ]
+
+      assert File.exists?(Path.join(gadget, "configs/c.1/mass_storage.boot"))
+      assert FakeConfigfs.read(gadget, "functions/hid.keyboard2/protocol") == "1"
+
+      assert {:error, {:duplicate_function, {:storage, "boot"}}} =
+               Kuroneko.Gadget.configure(pid, [{:storage, name: "boot"}, {:storage, name: "boot"}])
+
+      assert {:error, {:invalid_name, :keyboard, "a.b"}} =
+               Kuroneko.Gadget.configure(pid, [{:keyboard, name: "a.b"}])
+    end
+
+    test "networks: left alone unless asked for, then each with its own addresses", %{
+      gadget: gadget,
+      udc_class: udc_class
+    } do
+      File.mkdir_p!(Path.join(gadget, "strings/0x409"))
+      File.write!(Path.join(gadget, "strings/0x409/serialnumber"), "0123456789abcdef\n")
+
+      pid =
+        start_supervised!(
+          {Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, rmdir: &rm_rf/1, name: nil}
+        )
+
+      assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard])
+      assert File.exists?(Path.join(gadget, "configs/c.1/ncm.usb0"))
+      assert Kuroneko.Gadget.functions(pid) == [:keyboard]
+
+      assert :ok = Kuroneko.Gadget.configure(pid, [:network, {:network, name: "usb1"}, :keyboard])
+      assert Kuroneko.Gadget.functions(pid) == [:network, :keyboard]
+      device = FakeConfigfs.read(gadget, "functions/ncm.usb1/dev_addr")
+      host = FakeConfigfs.read(gadget, "functions/ncm.usb1/host_addr")
+      assert device =~ ~r/^[0-9a-f][26ae](:[0-9a-f]{2}){5}$/
+      assert host =~ ~r/^[0-9a-f][26ae](:[0-9a-f]{2}){5}$/
+      assert device != host
+
+      # The same addresses each time.
+      assert :ok = Kuroneko.Gadget.configure(pid, [:network, :keyboard])
+      assert :ok = Kuroneko.Gadget.configure(pid, [:network, {:network, name: "usb1"}, :keyboard])
+      assert FakeConfigfs.read(gadget, "functions/ncm.usb1/dev_addr") == device
+
+      # Without the system's network: it goes.
+      assert :ok = Kuroneko.Gadget.configure(pid, [{:network, name: "usb1"}])
+      refute File.exists?(Path.join(gadget, "configs/c.1/ncm.usb0"))
+      assert Kuroneko.Gadget.functions(pid) == [:network]
+    end
+
+    test "as many endpoints as the controller has", %{gadget: gadget, udc_class: udc_class} do
+      have = %{in: 7, out: 7}
+
+      pid =
+        start_supervised!(
+          {Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, endpoints: have, name: nil}
+        )
+
+      # The system's network takes two of them.
+      five = [:keyboard, :mouse, :relative_mouse, :storage, :microphone]
+      assert :ok = Kuroneko.Gadget.configure(pid, five)
+
+      assert {:error, {:not_enough_endpoints, %{need: %{in: 8, out: 3}, have: ^have}}} =
+               Kuroneko.Gadget.configure(pid, five ++ [{:storage, name: "boot"}])
+
+      # Without the network, two drives and a second network fit.
+      assert :ok =
+               Kuroneko.Gadget.validate(
+                 [
+                   {:network, name: "usb1"},
+                   :keyboard,
+                   :storage,
+                   {:storage, name: "boot"},
+                   :microphone
+                 ],
+                 endpoints: have
+               )
+
+      assert Kuroneko.Gadget.endpoints([:network, :storage, :speaker]) == {:ok, %{in: 3, out: 3}}
+    end
+  end
 end

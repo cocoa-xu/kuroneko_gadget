@@ -20,7 +20,9 @@ defmodule Kuroneko.Gadget.Storage do
   with Kuroneko's patch; without it the drive holds CDs only.
 
   The functions take a `:gadget` option, `Kuroneko.Gadget.default_gadget/0`
-  by default.
+  by default, `:storage`, the storage function's name (`"disk"`, the one
+  `:storage` makes, by default), and `:drive`, the drive in it: 0, the
+  first, by default.
   """
 
   @typedoc "The image in the drive and how the target computer sees it."
@@ -35,7 +37,12 @@ defmodule Kuroneko.Gadget.Storage do
   @type disc() :: :cd | :dvd | :bd
 
   @type insert_option() ::
-          {:cdrom, boolean()} | {:disc, disc()} | {:read_only, boolean()} | {:gadget, Path.t()}
+          {:cdrom, boolean()}
+          | {:disc, disc()}
+          | {:read_only, boolean()}
+          | {:gadget, Path.t()}
+          | {:storage, String.t()}
+          | {:drive, non_neg_integer()}
 
   @doc """
   Puts an image in the drive, in place of the one there.
@@ -68,9 +75,37 @@ defmodule Kuroneko.Gadget.Storage do
   end
 
   @doc """
+  The number of drives the storage function has (`:storage`, the default
+  one without it), 0 without the function.
+  """
+  @spec drives(keyword()) :: non_neg_integer()
+  def drives(opts \\ []) do
+    dir = Kuroneko.Gadget.function_dir(:storage, Keyword.put(opts, :name, opts[:storage]))
+
+    case File.ls(dir) do
+      {:ok, names} -> Enum.count(names, &String.starts_with?(&1, "lun."))
+      {:error, _reason} -> 0
+    end
+  end
+
+  @doc """
+  The image in each drive of the storage function, `nil` for an empty one,
+  in the order of the drives.
+  """
+  @spec media(keyword()) :: [medium() | nil]
+  def media(opts \\ []) do
+    for drive <- 0..(drives(opts) - 1)//1 do
+      case medium(Keyword.put(opts, :drive, drive)) do
+        {:ok, medium} -> medium
+        {:error, _reason} -> nil
+      end
+    end
+  end
+
+  @doc """
   Takes the image out of the drive, even when the target computer holds it.
   """
-  @spec eject([{:gadget, Path.t()}]) :: :ok | {:error, term()}
+  @spec eject(keyword()) :: :ok | {:error, term()}
   def eject(opts \\ []) do
     lun = lun(opts)
 
@@ -80,7 +115,7 @@ defmodule Kuroneko.Gadget.Storage do
   @doc """
   The image in the drive, `nil` when there is none.
   """
-  @spec medium([{:gadget, Path.t()}]) :: {:ok, medium() | nil} | {:error, term()}
+  @spec medium(keyword()) :: {:ok, medium() | nil} | {:error, term()}
   def medium(opts \\ []) do
     lun = lun(opts)
 
@@ -141,7 +176,12 @@ defmodule Kuroneko.Gadget.Storage do
     end
   end
 
-  defp lun(opts), do: Path.join(Kuroneko.Gadget.function_dir(:storage, opts), "lun.0")
+  # The drive's LUN in the storage function: `:storage` names the function,
+  # `:drive` the drive in it, the first by default.
+  defp lun(opts) do
+    dir = Kuroneko.Gadget.function_dir(:storage, Keyword.put(opts, :name, opts[:storage]))
+    Path.join(dir, "lun.#{Keyword.get(opts, :drive, 0)}")
+  end
 
   defp check_lun(lun) do
     if File.dir?(lun), do: :ok, else: {:error, :no_storage}

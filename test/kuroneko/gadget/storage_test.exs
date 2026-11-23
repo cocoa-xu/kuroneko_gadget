@@ -68,4 +68,27 @@ defmodule Kuroneko.Gadget.StorageTest do
 
     assert Storage.medium(gadget: tmp_dir) == {:error, :no_storage}
   end
+
+  test "a drive of several, and another storage function", %{gadget: gadget, iso: iso, disk: disk} do
+    for lun <- ["functions/mass_storage.disk/lun.1", "functions/mass_storage.boot/lun.0"] do
+      dir = Path.join(gadget, lun)
+      File.mkdir_p!(dir)
+
+      for attribute <- ["file", "cdrom", "profile", "ro"],
+          do: File.write!(Path.join(dir, attribute), "")
+    end
+
+    assert Storage.drives(gadget: gadget) == 2
+    assert :ok = Storage.insert(iso, gadget: gadget, drive: 1, disc: :cd)
+    assert :ok = Storage.insert(disk, gadget: gadget, storage: "boot")
+
+    assert Storage.media(gadget: gadget) == [
+             nil,
+             %{image: iso, cdrom: true, disc: :cd, read_only: true}
+           ]
+
+    assert {:ok, %{image: ^disk, cdrom: false}} = Storage.medium(gadget: gadget, storage: "boot")
+    assert :ok = Storage.eject(gadget: gadget, drive: 1)
+    assert Storage.media(gadget: gadget) == [nil, nil]
+  end
 end

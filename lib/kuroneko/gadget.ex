@@ -14,10 +14,25 @@ defmodule Kuroneko.Gadget do
       (a pen, for Android and iPadOS) or a `:touch` screen
     * `:relative_mouse` - a boot mouse that moves by steps, for
       `Kuroneko.Gadget.HID`, which BIOS setups and games take
-    * `:storage` - a removable drive or CD-ROM drive, for
-      `Kuroneko.Gadget.Storage`
+    * `:storage` - removable drives or optical drives, for
+      `Kuroneko.Gadget.Storage`; `{:storage, drives: 3}` has three, up to 16,
+      which take the endpoints of one
+    * `:network` - a USB network adapter (NCM), see "The network" below
     * `:microphone` - a microphone the target computer records from
     * `:speaker` - a speaker the target computer plays to
+
+  There may be several functions of a kind, each with a `:name`:
+  `[:storage, {:storage, name: "boot"}]` are two storage functions, which the
+  target sees as two devices. Without a name a function is its kind's first:
+  `"keyboard"`, `"mouse"`, `"relative_mouse"`, `"disk"`, `"usb0"`, `"audio"`.
+  Names take letters, digits, `_` and `-`. `instances/1` tells what the
+  gadget has.
+
+  Each function takes endpoints of the device controller, which has few:
+  HID functions one IN, a storage function one IN and one OUT, a network
+  function two IN and one OUT, the microphone one IN, the speaker one OUT
+  (`endpoints/1`). With the `:endpoints` option, the functions asked for
+  must fit, or `configure/2` says how many they need and how many there are.
 
   The microphone and the speaker are the two directions of one USB Audio
   Class 2 function, which Linux shows as the ALSA card `UAC2Gadget`. Each
@@ -59,12 +74,21 @@ defmodule Kuroneko.Gadget do
   them at once, and the `:persist` function of the `:network` option keeps
   them for the next boots.
 
+  The functions take network functions in hand only when they include a
+  `:network`: then `[:network, {:network, name: "usb1"}]` keeps the system's
+  network and adds a second, whose interface the kernel names, and a list
+  without the system's network removes it. Another network's addresses are
+  made from the gadget's serial number and the function's name, the same at
+  each boot; the system's network, made again, takes the default addresses.
+
   ## Options
 
     * `:functions` - the functions to have, none by default
     * `:name` - the name to register, `Kuroneko.Gadget` by default
     * `:gadget` - the gadget's configfs directory, `default_gadget/0` by
       default
+    * `:endpoints` - the device controller's endpoints besides endpoint 0,
+      `%{in: 7, out: 7}`; not checked without it
     * `:max_packet` - the largest packets the device controller takes for
       the `:microphone` and the `:speaker`, in bytes: 1024 each by default,
       the most high speed carries
@@ -92,17 +116,36 @@ defmodule Kuroneko.Gadget do
 
   @config "configs/c.1"
   @udc_class "/sys/class/udc"
-  @dirs %{
-    keyboard: "hid.keyboard",
-    mouse: "hid.mouse",
-    relative_mouse: "hid.relative_mouse",
-    storage: "mass_storage.disk",
-    microphone: "uac2.audio",
-    speaker: "uac2.audio"
+  # Each kind's configfs type, and the name of its instance by default.
+  @types %{
+    keyboard: "hid",
+    mouse: "hid",
+    relative_mouse: "hid",
+    storage: "mass_storage",
+    network: "ncm",
+    microphone: "uac2",
+    speaker: "uac2",
+    audio: "uac2"
   }
-  # The order they are added in: the keyboard comes before the mouse.
-  @order [:keyboard, :mouse, :relative_mouse, :storage, :microphone, :speaker]
+  @default_names %{
+    keyboard: "keyboard",
+    mouse: "mouse",
+    relative_mouse: "relative_mouse",
+    storage: "disk",
+    network: "usb0",
+    microphone: "audio",
+    speaker: "audio",
+    audio: "audio"
+  }
+  # The order they are added in: the network first, the keyboard before the
+  # mouse. The microphone and speaker of a name are one audio function.
+  @order [:network, :keyboard, :mouse, :relative_mouse, :storage, :audio]
   @audio [:microphone, :speaker]
+  @hid [:keyboard, :mouse, :relative_mouse]
+  @max_drives 16
+  # The LUN settings a storage function keeps when it changes, in the order
+  # they are written back: the medium last.
+  @lun_settings [:removable, :cdrom, :profile, :ro, :nofua, :inquiry_string, :file]
   # The configfs attributes of the audio directions start with these.
   @prefix %{microphone: "p_", speaker: "c_"}
   # Channel positions: front left and right, center, LFE, back, side.
@@ -143,15 +186,24 @@ defmodule Kuroneko.Gadget do
   @network_kept [:qmult, :max_segment_size]
 
   @type function_name() ::
-          :keyboard | :mouse | :relative_mouse | :storage | :microphone | :speaker
+          :keyboard | :mouse | :relative_mouse | :storage | :network | :microphone | :speaker
 
   @type audio_option() ::
           {:channels, 1..8} | {:rates, [pos_integer()]} | {:sample_bits, 16 | 24 | 32}
 
   @type function_spec() ::
           function_name()
-          | {:microphone | :speaker, [audio_option()]}
-          | {:mouse, [mode: Kuroneko.Gadget.HID.pointer_mode()]}
+          | {:microphone | :speaker, [audio_option() | {:name, String.t()}]}
+          | {:mouse, [mode: Kuroneko.Gadget.HID.pointer_mode(), name: String.t()]}
+          | {:storage, [drives: 1..16, name: String.t()]}
+          | {:keyboard | :relative_mouse | :network, [name: String.t()]}
+
+  @typedoc "A function on the gadget, see `instances/1`."
+  @type instance() :: %{
+          required(:kind) => atom(),
+          required(:name) => String.t(),
+          optional(atom()) => term()
+        }
 
   @typedoc "The state of the USB connection, see `connection/1`."
   @type connection_state() ::
@@ -215,6 +267,7 @@ defmodule Kuroneko.Gadget do
           | {:max_packet, %{optional(:microphone | :speaker) => pos_integer()}}
           | {:names, [name_option()]}
           | {:network, [network_option()]}
+          | {:endpoints, %{in: non_neg_integer(), out: non_neg_integer()}}
 
   @doc """
   Starts the process and sets up the functions. See the module documentation
@@ -227,7 +280,9 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc """
-  Sets up these functions and removes the other KVM functions.
+  Sets up these functions and removes the other KVM functions. Network
+  functions are among them when the list has a `:network`; without one, the
+  network the system set up stays as it is.
   """
   @spec configure(GenServer.server(), [function_spec()]) :: :ok | {:error, term()}
   def configure(server \\ __MODULE__, functions) when is_list(functions) do
@@ -236,8 +291,9 @@ defmodule Kuroneko.Gadget do
 
   @doc """
   Checks functions without setting them up: whether `configure/2` would
-  take them from a process started with these options (only `:max_packet`
-  counts).
+  take them from a process started with these options (`:max_packet` and
+  `:endpoints` count; `configure/2` also counts the network functions it
+  leaves alone).
 
       iex> Kuroneko.Gadget.validate([:keyboard, {:microphone, channels: 1, rates: [44_100]}])
       :ok
@@ -246,14 +302,38 @@ defmodule Kuroneko.Gadget do
   """
   @spec validate([function_spec()], [option()]) :: :ok | {:error, term()}
   def validate(functions, opts \\ []) when is_list(functions) do
-    with {:ok, _normalized} <- normalize(functions, max_packet(opts)), do: :ok
+    with {:ok, instances} <- normalize(functions, max_packet(opts)),
+         do: check_endpoints(instances, Keyword.get(opts, :endpoints))
   end
 
   @doc """
-  The KVM functions the gadget has.
+  The kinds of KVM functions the gadget has, each once.
   """
   @spec functions(GenServer.server()) :: [function_name()]
   def functions(server \\ __MODULE__), do: GenServer.call(server, :functions)
+
+  @doc """
+  The functions on the gadget that this module knows, each with its kind and
+  name, as `configure/2` takes them back:
+
+      [%{kind: :network, name: "usb0"}, %{kind: :keyboard, name: "keyboard"},
+       %{kind: :storage, name: "disk", drives: 2},
+       %{kind: :audio, name: "audio", microphone: %{channels: 2, ...}, speaker: nil}]
+  """
+  @spec instances(GenServer.server()) :: [instance()]
+  def instances(server \\ __MODULE__), do: GenServer.call(server, :instances)
+
+  @doc """
+  The endpoints the functions take, `%{in: 4, out: 1}`: each HID function
+  one IN, a storage function one of each, a network function two IN and one
+  OUT, a microphone one IN, a speaker one OUT. Endpoint 0 is not counted.
+  """
+  @spec endpoints([function_spec()]) ::
+          {:ok, %{in: non_neg_integer(), out: non_neg_integer()}} | {:error, term()}
+  def endpoints(functions) do
+    with {:ok, instances} <- normalize(functions, max_packet([])),
+         do: {:ok, count_endpoints(instances)}
+  end
 
   @doc """
   The formats of the audio directions the gadget has, such as
@@ -402,10 +482,13 @@ defmodule Kuroneko.Gadget do
   end
 
   @doc false
+  # A function's directory: `:name` picks the instance, the kind's default
+  # one without it.
   @spec function_dir(function_name(), keyword()) :: Path.t()
   def function_dir(function, opts) do
     gadget = Keyword.get_lazy(opts, :gadget, &default_gadget/0)
-    Path.join([gadget, "functions", @dirs[function]])
+    name = Keyword.get(opts, :name) || @default_names[function]
+    Path.join([gadget, "functions", "#{@types[function]}.#{name}"])
   end
 
   @impl GenServer
@@ -424,6 +507,8 @@ defmodule Kuroneko.Gadget do
     state = %{
       gadget: Keyword.get_lazy(opts, :gadget, &default_gadget/0),
       max_packet: max_packet,
+      endpoints: Keyword.get(opts, :endpoints),
+      network_managed: network?(functions),
       names: Map.new(names),
       network: %{
         function: Keyword.get(network, :function, "ncm.usb0"),
@@ -448,22 +533,38 @@ defmodule Kuroneko.Gadget do
 
   @impl GenServer
   def handle_call({:configure, functions}, _from, state) do
-    {:reply, apply_functions(state, functions), state}
+    case apply_functions(state, functions) do
+      :ok -> {:reply, :ok, %{state | network_managed: network?(functions)}}
+      error -> {:reply, error, state}
+    end
   end
 
   def handle_call(:functions, _from, state) do
-    {:reply, Enum.map(present(state.gadget), &name/1), state}
+    kinds =
+      state
+      |> managed(present(state.gadget))
+      |> Enum.flat_map(fn
+        %{kind: :audio} = audio -> Enum.filter(@audio, &audio[&1])
+        %{kind: kind} -> [kind]
+      end)
+      |> Enum.uniq()
+
+    {:reply, kinds, state}
   end
 
-  def handle_call(:audio, _from, state) do
-    present = present(state.gadget)
+  def handle_call(:instances, _from, state), do: {:reply, present(state.gadget), state}
 
-    {:reply,
-     for(
-       {function, format} when function in @audio <- present,
-       into: %{},
-       do: {function, format}
-     ), state}
+  def handle_call(:audio, _from, state) do
+    audio =
+      case Enum.find(present(state.gadget), &match?(%{kind: :audio, name: "audio"}, &1)) do
+        nil ->
+          %{}
+
+        unit ->
+          for direction <- @audio, unit[direction], into: %{}, do: {direction, unit[direction]}
+      end
+
+    {:reply, audio, state}
   end
 
   def handle_call(:network, _from, state), do: {:reply, read_network(state), state}
@@ -640,18 +741,21 @@ defmodule Kuroneko.Gadget do
   # network first, then the KVM functions and any others.
   defp links(state) do
     config = Path.join(state.gadget, @config)
-    order = Enum.uniq([state.network.function | Enum.map(@order, &@dirs[&1])])
+
+    rank = fn {name, function} ->
+      kind =
+        case instance_of(function) do
+          [%{kind: kind}] -> kind
+          [] -> nil
+        end
+
+      {if(name == state.network.function, do: 0, else: 1),
+       Enum.find_index(@order, &(&1 == kind)) || length(@order), name}
+    end
 
     case File.ls(config) do
-      {:ok, names} ->
-        names
-        |> Enum.flat_map(&link_target(config, &1))
-        |> Enum.sort_by(fn {name, _function} ->
-          Enum.find_index(order, &(&1 == name)) || length(order)
-        end)
-
-      {:error, _reason} ->
-        []
+      {:ok, names} -> names |> Enum.flat_map(&link_target(config, &1)) |> Enum.sort_by(rank)
+      {:error, _reason} -> []
     end
   end
 
@@ -716,148 +820,255 @@ defmodule Kuroneko.Gadget do
   defp apply_functions(state, functions) do
     with {:ok, wanted} <- normalize(functions, state.max_packet),
          :ok <- check_gadget(state.gadget) do
-      present = present(state.gadget)
+      all = present(state.gadget)
+      {present, others} = Enum.split_with(all, &(network?(functions) or &1.kind != :network))
 
-      if wanted == present,
-        do: :ok,
-        else: change(state, present, wanted)
+      with :ok <- check_endpoints(wanted ++ others, state.endpoints) do
+        if wanted == present,
+          do: :ok,
+          else: change(state, present, wanted)
+      end
     end
   end
+
+  # The KVM functions: the network ones only when they are managed.
+  defp managed(state, instances),
+    do: Enum.filter(instances, &(state.network_managed or &1.kind != :network))
+
+  defp network?(functions),
+    do: Enum.any?(functions, &(&1 == :network or match?({:network, _}, &1)))
 
   defp change(state, present, wanted) do
     Logger.info("kuroneko_gadget: USB functions #{inspect(wanted)}, reconnecting the gadget")
     udc = bound_udc(state.gadget)
 
-    with {:error, reason} <- switch(state, udc, units(present), units(wanted)) do
+    with {:error, reason} <- switch(state, udc, present, wanted) do
       Logger.error(
         "kuroneko_gadget: USB functions #{inspect(wanted)} refused: #{inspect(reason)}"
       )
 
-      _ = switch(state, udc, units(present(state.gadget)), units(present))
+      now =
+        state |> managed(present(state.gadget)) |> Enum.filter(&(&1 in present or &1 in wanted))
+
+      _ = switch(state, udc, now, present)
       {:error, reason}
     end
   end
 
+  # A storage function that changes keeps the media of the drives it keeps.
   defp switch(state, udc, from, to) do
+    kept =
+      for %{kind: :storage, name: name} = old <- from -- to,
+          Enum.any?(to -- from, &match?(%{kind: :storage, name: ^name}, &1)),
+          into: %{},
+          do: {name, lun_settings(dir(state.gadget, old))}
+
     with :ok <- unbind(state.gadget, bound_udc(state.gadget)),
-         :ok <- each(from -- to, &remove(state.gadget, &1)),
-         :ok <- each(to -- from, &add(state, &1)),
+         :ok <- each(from -- to, &remove(state, &1)),
+         :ok <- each(to -- from, &add(state, &1, kept)),
          # Bus powered, and the keyboard and mice may wake the target.
          :ok <- write_existing(Path.join(state.gadget, @config), bmAttributes: "0xa0") do
       bind(state, udc)
     end
   end
 
-  # The function directories: the microphone and the speaker share one, set
-  # up for the directions and formats asked for. configfs only takes new
-  # settings for a function that is not in use, so others mean a new
-  # function.
-  defp units(functions) do
-    case for(
-           {function, format} when function in @audio <- functions,
-           into: %{},
-           do: {function, format}
-         ) do
-      audio when audio == %{} -> functions
-      audio -> Enum.reject(functions, &(name(&1) in @audio)) ++ [{:audio, audio}]
-    end
-  end
-
-  # The functions in @order, the audio directions with their formats.
+  # The functions in the configuration that this module knows, in order.
   defp present(gadget) do
-    Enum.flat_map(@order, fn
-      function when function in @audio ->
-        case audio_direction(gadget, function) do
-          {:ok, format} -> [{function, format}]
-          :error -> []
-        end
+    config = Path.join(gadget, @config)
 
-      function ->
-        if match?({:ok, _stat}, File.lstat(link(gadget, function))),
-          do: [with_options(gadget, function)],
-          else: []
-    end)
-  end
+    case File.ls(config) do
+      {:ok, names} ->
+        names
+        |> Enum.flat_map(&link_target(config, &1))
+        |> Enum.flat_map(fn {_name, function} -> instance_of(function) end)
+        |> sort()
 
-  # The mouse's mode is in its report descriptor.
-  defp with_options(gadget, :mouse) do
-    path = Path.join(function_dir(:mouse, gadget: gadget), "report_desc")
-
-    with {:ok, report_desc} <- File.read(path),
-         mode when mode != nil <- Descriptor.pointer_mode(report_desc) do
-      {:mouse, %{mode: mode}}
-    else
-      _ -> {:mouse, %{mode: nil}}
+      {:error, _reason} ->
+        []
     end
   end
 
-  defp with_options(_gadget, function), do: function
+  defp sort(instances),
+    do:
+      Enum.sort_by(instances, &{Enum.find_index(@order, fn kind -> kind == &1.kind end), &1.name})
 
-  defp audio_direction(gadget, function) do
-    dir = function_dir(function, gadget: gadget)
+  # What a function directory is, from its type and settings. HID functions
+  # are known by their report descriptors, or by the names of this module's.
+  defp instance_of(dir) do
+    case String.split(Path.basename(dir), ".", parts: 2) do
+      ["hid", name] -> hid_instance(dir, name)
+      ["mass_storage", name] -> [%{kind: :storage, name: name, drives: max(count_luns(dir), 1)}]
+      ["ncm", name] -> [%{kind: :network, name: name}]
+      ["uac2", name] -> audio_instance(dir, name)
+      _other -> []
+    end
+  end
+
+  defp hid_instance(dir, name) do
+    report_desc =
+      case File.read(Path.join(dir, "report_desc")) do
+        {:ok, data} -> data
+        {:error, _reason} -> nil
+      end
+
+    cond do
+      report_desc == Descriptor.keyboard().report_desc ->
+        [%{kind: :keyboard, name: name}]
+
+      report_desc == Descriptor.relative_mouse().report_desc ->
+        [%{kind: :relative_mouse, name: name}]
+
+      mode = report_desc && Descriptor.pointer_mode(report_desc) ->
+        [%{kind: :mouse, name: name, mode: mode}]
+
+      name == "mouse" ->
+        [%{kind: :mouse, name: name, mode: nil}]
+
+      name in ["keyboard", "relative_mouse"] ->
+        [%{kind: String.to_existing_atom(name), name: name}]
+
+      true ->
+        []
+    end
+  end
+
+  defp audio_instance(dir, name) do
+    directions =
+      for direction <- @audio, into: %{}, do: {direction, audio_direction(dir, direction)}
+
+    if Enum.any?(directions, fn {_direction, format} -> format end),
+      do: [Map.merge(%{kind: :audio, name: name}, directions)],
+      else: []
+  end
+
+  defp audio_direction(dir, function) do
     read = fn attribute -> File.read(Path.join(dir, @prefix[function] <> attribute)) end
 
-    with {:ok, _stat} <- File.lstat(link(gadget, function)),
-         {:ok, mask} <- read.("chmask"),
+    with {:ok, mask} <- read.("chmask"),
          {mask, _rest} when mask > 0 <- Integer.parse(mask),
          {:ok, rates} <- read.("srate"),
          {:ok, ssize} <- read.("ssize"),
          {ssize, _rest} <- Integer.parse(ssize) do
       rates = rates |> String.split([",", "\n"], trim: true) |> Enum.map(&String.to_integer/1)
-      {:ok, %{channels: popcount(mask), rates: rates, sample_bits: ssize * 8}}
+      %{channels: popcount(mask), rates: rates, sample_bits: ssize * 8}
     else
-      _ -> :error
+      _ -> nil
+    end
+  end
+
+  defp count_luns(dir) do
+    case File.ls(dir) do
+      {:ok, names} -> Enum.count(names, &String.starts_with?(&1, "lun."))
+      {:error, _reason} -> 0
     end
   end
 
   defp popcount(0), do: 0
   defp popcount(n), do: (n &&& 1) + popcount(n >>> 1)
 
-  defp name({function, _format}), do: function
-  defp name(function), do: function
+  defp dir_name(%{kind: kind, name: name}), do: "#{@types[kind]}.#{name}"
+  defp dir(gadget, instance), do: Path.join([gadget, "functions", dir_name(instance)])
+  defp link_path(gadget, instance), do: Path.join([gadget, @config, dir_name(instance)])
 
-  defp add(state, unit) do
-    function = unit_function(unit)
-    dir = function_dir(function, gadget: state.gadget)
+  defp add(state, instance, kept) do
+    dir = dir(state.gadget, instance)
 
     with :ok <- File.mkdir_p(dir),
-         :ok <- setup(dir, unit, state) do
-      File.ln_s(dir, link(state.gadget, function))
+         :ok <- setup(dir, instance, state),
+         :ok <- restore_luns(dir, instance, kept[instance.name]) do
+      File.ln_s(dir, link_path(state.gadget, instance))
     end
   end
 
-  defp unit_function({:audio, audio}), do: if(audio[:microphone], do: :microphone, else: :speaker)
-  defp unit_function({function, _options}), do: function
-  defp unit_function(function), do: function
+  defp setup(dir, %{kind: :keyboard}, _state), do: setup_hid(dir, Descriptor.keyboard())
+  defp setup(dir, %{kind: :mouse, mode: mode}, _state), do: setup_hid(dir, Descriptor.mouse(mode))
 
-  defp setup(dir, :keyboard, _state), do: setup_hid(dir, Descriptor.keyboard())
-  defp setup(dir, {:mouse, %{mode: mode}}, _state), do: setup_hid(dir, Descriptor.mouse(mode))
-  defp setup(dir, :relative_mouse, _state), do: setup_hid(dir, Descriptor.relative_mouse())
+  defp setup(dir, %{kind: :relative_mouse}, _state),
+    do: setup_hid(dir, Descriptor.relative_mouse())
 
-  # configfs makes lun.0 with the function; mkdir_p is for plain directories.
-  defp setup(dir, :storage, state) do
-    lun = Path.join(dir, "lun.0")
-
+  # configfs makes lun.0 with the function, the others with mkdir; mkdir_p
+  # is for plain directories.
+  defp setup(dir, %{kind: :storage, drives: drives}, state) do
     inquiry =
       case state.names[:storage] do
         {vendor, product, revision} -> [inquiry_string: inquiry(vendor, product, revision)]
         nil -> []
       end
 
-    with :ok <- File.mkdir_p(lun) do
-      write_all(lun, [removable: "1", cdrom: "0", ro: "0", nofua: "0"] ++ inquiry)
-    end
+    each(0..(drives - 1), fn drive ->
+      lun = Path.join(dir, "lun.#{drive}")
+
+      with :ok <- File.mkdir_p(lun),
+           do: write_all(lun, [removable: "1", cdrom: "0", ro: "0", nofua: "0"] ++ inquiry)
+    end)
   end
 
-  defp setup(dir, {:audio, audio}, state) do
-    with :ok <- write_all(dir, direction(:microphone, audio[:microphone], state.max_packet)),
-         :ok <- write_all(dir, direction(:speaker, audio[:speaker], state.max_packet)),
+  # A network function's addresses stay the same across boots: the
+  # system's network takes the default ones, another network its own, made
+  # from the gadget's serial number and its name.
+  defp setup(dir, %{kind: :network, name: name}, state) do
+    addresses =
+      if "ncm.#{name}" == state.network.function and state.network.default_addresses,
+        do: state.network.default_addresses,
+        else: derived_addresses(state.gadget, name)
+
+    write_all(dir, dev_addr: addresses.device_address, host_addr: addresses.host_address)
+  end
+
+  defp setup(dir, %{kind: :audio} = audio, state) do
+    with :ok <- write_all(dir, direction(:microphone, audio.microphone, state.max_packet)),
+         :ok <- write_all(dir, direction(:speaker, audio.speaker, state.max_packet)),
          # No feedback endpoint: the speaker follows the computer's clock.
          :ok <- write_all(dir, c_sync: "adaptive") do
       # Where the kernel takes them: no interrupt endpoint, which the
       # controls do without and the functions need, and the names.
       write_existing(dir, [int_ep_present: "0"] ++ audio_names(state.names))
     end
+  end
+
+  defp derived_addresses(gadget, name) do
+    serial =
+      case File.read(Path.join(gadget, "strings/0x409/serialnumber")) do
+        {:ok, serial} -> String.trim(serial)
+        {:error, _reason} -> ""
+      end
+
+    address = fn role ->
+      <<first, rest::binary-size(5), _::binary>> =
+        :crypto.hash(:sha256, [serial, 0, name, 0, role])
+
+      # Locally administered, unicast.
+      format_address(<<(first &&& 0xFC) ||| 0x02, rest::binary>>)
+    end
+
+    %{device_address: address.("device"), host_address: address.("host")}
+  end
+
+  # The media of a storage function's drives, to write back when it changes.
+  defp lun_settings(dir) do
+    for drive <- 0..(count_luns(dir) - 1)//1, into: %{} do
+      lun = Path.join(dir, "lun.#{drive}")
+
+      settings =
+        for name <- @lun_settings,
+            {:ok, value} <- [File.read(Path.join(lun, Atom.to_string(name)))],
+            do: {name, String.trim_trailing(value, "\n")}
+
+      {drive, settings}
+    end
+  end
+
+  defp restore_luns(_dir, _instance, nil), do: :ok
+
+  # Every kernel has a LUN's file; the other settings where it has them.
+  defp restore_luns(dir, %{drives: drives}, kept) do
+    each(Enum.filter(kept, fn {drive, _settings} -> drive < drives end), fn {drive, settings} ->
+      lun = Path.join(dir, "lun.#{drive}")
+      {file, others} = Keyword.split(settings, [:file])
+
+      with :ok <- write_existing(lun, others),
+           do: write_all(lun, Enum.reject(file, &match?({:file, ""}, &1)))
+    end)
   end
 
   # SCSI INQUIRY: vendor (8), product (16), revision (4), padded.
@@ -903,15 +1114,18 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  defp remove(gadget, unit) do
-    function = unit_function(unit)
+  # configfs removes a function's attributes with it, its extra drives first.
+  defp remove(state, instance) do
+    dir = dir(state.gadget, instance)
 
-    with :ok <- File.rm(link(gadget, function)) do
-      File.rmdir(function_dir(function, gadget: gadget))
+    extra_luns =
+      for drive <- (count_luns(dir) - 1)..1//-1, do: Path.join(dir, "lun.#{drive}")
+
+    with :ok <- File.rm(link_path(state.gadget, instance)),
+         :ok <- each(extra_luns, state.rmdir) do
+      state.rmdir.(dir)
     end
   end
-
-  defp link(gadget, function), do: Path.join([gadget, @config, @dirs[function]])
 
   defp bound_udc(gadget) do
     case File.read(Path.join(gadget, "UDC")) do
@@ -953,40 +1167,130 @@ defmodule Kuroneko.Gadget do
     end)
   end
 
-  # The functions asked for in @order, the audio directions with their
-  # formats.
+  # The functions asked for, in order: the audio directions of a name are
+  # one function, with their formats.
   defp normalize(specs, max_packet) do
     with {:ok, entries} <- collect(specs, &entry(&1, max_packet)),
-         :ok <- unique(Enum.map(entries, &name/1)) do
-      {:ok, Enum.sort_by(entries, &Enum.find_index(@order, fn f -> f == name(&1) end))}
+         {:ok, instances} <- merge_audio(entries),
+         :ok <- unique(instances) do
+      {:ok, sort(instances)}
     end
   end
 
-  defp entry(function, max_packet) when function in [:mouse | @audio],
-    do: entry({function, []}, max_packet)
+  defp entry(kind, max_packet) when is_atom(kind) and is_map_key(@types, kind) and kind != :audio,
+    do: entry({kind, []}, max_packet)
 
-  defp entry(function, _max_packet) when function in @order, do: {:ok, function}
+  defp entry({kind, opts}, max_packet)
+       when (is_list(opts) and kind in [:mouse | @audio]) or
+              (kind in [:keyboard, :relative_mouse, :storage, :network] and is_list(opts)) do
+    {name, opts} = Keyword.pop(opts, :name, @default_names[kind])
 
-  defp entry({:mouse, opts}, _max_packet) when is_list(opts) do
-    case Keyword.pop(opts, :mode, :absolute) do
-      {mode, []} when mode in [:absolute, :stylus, :touch] -> {:ok, {:mouse, %{mode: mode}}}
-      {mode, []} -> {:error, {:invalid_mode, :mouse, mode}}
-      {_mode, rest} -> {:error, {:unknown_options, :mouse, Keyword.keys(rest)}}
-    end
-  end
-
-  defp entry({function, opts}, max_packet) when function in @audio and is_list(opts) do
-    with {:ok, format} <- audio_format(function, opts, max_packet),
-         do: {:ok, {function, format}}
+    if valid_name?(name),
+      do: kind_entry(kind, name, opts, max_packet),
+      else: {:error, {:invalid_name, kind, name}}
   end
 
   defp entry(other, _max_packet), do: {:error, {:unknown_function, other}}
 
-  defp unique(names) do
+  defp kind_entry(:mouse, name, opts, _max_packet) do
+    case Keyword.pop(opts, :mode, :absolute) do
+      {mode, []} when mode in [:absolute, :stylus, :touch] ->
+        {:ok, %{kind: :mouse, name: name, mode: mode}}
+
+      {mode, []} ->
+        {:error, {:invalid_mode, :mouse, mode}}
+
+      {_mode, rest} ->
+        {:error, {:unknown_options, :mouse, Keyword.keys(rest)}}
+    end
+  end
+
+  defp kind_entry(:storage, name, opts, _max_packet) do
+    case Keyword.pop(opts, :drives, 1) do
+      {drives, []} when drives in 1..@max_drives ->
+        {:ok, %{kind: :storage, name: name, drives: drives}}
+
+      {drives, []} ->
+        {:error, {:invalid_drives, drives}}
+
+      {_drives, rest} ->
+        {:error, {:unknown_options, :storage, Keyword.keys(rest)}}
+    end
+  end
+
+  defp kind_entry(kind, name, opts, max_packet) when kind in @audio do
+    with {:ok, format} <- audio_format(kind, opts, max_packet),
+         do: {:ok, %{kind: kind, name: name, format: format}}
+  end
+
+  defp kind_entry(kind, name, [], _max_packet), do: {:ok, %{kind: kind, name: name}}
+
+  defp kind_entry(kind, _name, opts, _max_packet),
+    do: {:error, {:unknown_options, kind, Keyword.keys(opts)}}
+
+  # configfs takes names of letters, digits, "_" and "-".
+  defp valid_name?(name) do
+    is_binary(name) and byte_size(name) in 1..32 and
+      String.match?(name, ~r/^[A-Za-z0-9_-]+$/)
+  end
+
+  # A microphone and a speaker of one name are the two directions of a USB
+  # Audio Class 2 function.
+  defp merge_audio(entries) do
+    {directions, others} = Enum.split_with(entries, &(&1.kind in @audio))
+
+    Enum.reduce_while(directions, {:ok, %{}}, fn %{kind: kind, name: name, format: format},
+                                                 {:ok, acc} ->
+      unit = Map.get(acc, name, %{kind: :audio, name: name, microphone: nil, speaker: nil})
+
+      if unit[kind],
+        do: {:halt, {:error, {:duplicate_function, kind}}},
+        else: {:cont, {:ok, Map.put(acc, name, Map.put(unit, kind, format))}}
+    end)
+    |> case do
+      {:ok, units} -> {:ok, others ++ Map.values(units)}
+      error -> error
+    end
+  end
+
+  defp unique(instances) do
+    names = Enum.map(instances, &dir_name/1)
+
     case names -- Enum.uniq(names) do
       [] -> :ok
-      [function | _rest] -> {:error, {:duplicate_function, function}}
+      [dir | _rest] -> {:error, {:duplicate_function, duplicate_kind(instances, dir)}}
     end
+  end
+
+  defp duplicate_kind(instances, dir) do
+    case Enum.find(instances, &(dir_name(&1) == dir)) do
+      %{kind: kind, name: name} -> if name == @default_names[kind], do: kind, else: {kind, name}
+    end
+  end
+
+  # The endpoints functions take, and whether the controller has them.
+  defp count_endpoints(instances) do
+    Enum.reduce(instances, %{in: 0, out: 0}, fn instance, acc ->
+      {ins, outs} = endpoint_cost(instance)
+      %{in: acc.in + ins, out: acc.out + outs}
+    end)
+  end
+
+  defp endpoint_cost(%{kind: kind}) when kind in @hid, do: {1, 0}
+  defp endpoint_cost(%{kind: :storage}), do: {1, 1}
+  defp endpoint_cost(%{kind: :network}), do: {2, 1}
+
+  defp endpoint_cost(%{kind: :audio} = audio),
+    do: {if(audio.microphone, do: 1, else: 0), if(audio.speaker, do: 1, else: 0)}
+
+  defp check_endpoints(_instances, nil), do: :ok
+
+  defp check_endpoints(instances, have) do
+    need = count_endpoints(instances)
+
+    if need.in <= have.in and need.out <= have.out,
+      do: :ok,
+      else: {:error, {:not_enough_endpoints, %{need: need, have: have}}}
   end
 
   defp audio_format(function, opts, max_packet) do

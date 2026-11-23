@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+* Several functions of a kind, each with a name: two storage functions,
+  two networks, two keyboards; `Kuroneko.Gadget.instances/1` tells them
+* A storage function with several drives, `{:storage, drives: 3}`, up to 16
+  on the endpoints of one; a change of their number keeps the media of the
+  drives that stay. `Kuroneko.Gadget.Storage` takes `:storage` and `:drive`
+  for a drive, and tells them all with `drives/1` and `media/1`
+* Network functions as KVM functions when asked for with `:network`, other
+  networks with addresses that stay across boots
+* The device controller's endpoints as a budget, `:endpoints`, and
+  `Kuroneko.Gadget.endpoints/1`
 * `Kuroneko.Gadget.Storage`: the optical drive holds a CD, a DVD or a BD
   (`disc:`, a DVD by default), so that images over 2.3 GB, which a CD
   cannot address, go in whole. It needs the kernel's `profile` attribute
