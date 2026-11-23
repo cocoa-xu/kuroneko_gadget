@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+* CDs whose image keeps the sectors as the disc has them, a CUE sheet's
+  BIN: `Kuroneko.Gadget.Storage.insert/2` takes their `:tracks`, audio and
+  data of mode 1 or 2, and `medium/1` tells them (the kernel's `tracks`
+  attribute)
+* The target sees a drive anew when it changes between optical and
+  removable, which it only reads when the drive appears: the gadget leaves
+  the USB bus and comes back (`Kuroneko.Gadget.replug/1`, `:replug`)
+* Ejecting a medium the target has locked, such as a mounted disc, first
+  asks the target to eject it, as an optical drive's button does (the
+  kernel's `eject_request`), and gives it `:wait` milliseconds; then it is
+  forced out and the target sees the drive anew
+
 ## v0.2.0 (2026-11-23)
 
 * Several functions of a kind, each with a name: two storage functions,

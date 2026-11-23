@@ -379,6 +379,32 @@ defmodule Kuroneko.Gadget do
   def audio(server \\ __MODULE__), do: GenServer.call(server, :audio)
 
   @doc """
+  Takes the gadget off the USB bus and puts it back, so that the target
+  computer finds it anew, as if it had been unplugged: all of its devices
+  reconnect. A computer reads what kind of drive a mass storage logical
+  unit is only then. Takes `:gadget` and `:udc_class` as `connection/1`
+  does, and `:replug_ms`, how long the gadget is off the bus, 1500 by
+  default. A gadget on no device controller stays as it is.
+  """
+  @spec replug(keyword()) :: :ok | {:error, term()}
+  def replug(opts \\ []) do
+    udc_class = Keyword.get(opts, :udc_class, @udc_class)
+
+    case bound_udc(Keyword.get_lazy(opts, :gadget, &default_gadget/0)) do
+      "" ->
+        :ok
+
+      udc ->
+        control = Path.join([udc_class, udc, "soft_connect"])
+
+        with :ok <- File.write(control, "disconnect") do
+          Process.sleep(Keyword.get(opts, :replug_ms, 1500))
+          File.write(control, "connect")
+        end
+    end
+  end
+
+  @doc """
   The USB connection to the target computer: the state the target has put
   the device in, the speed, and the device controller.
 
