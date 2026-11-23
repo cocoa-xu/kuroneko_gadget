@@ -95,6 +95,37 @@ defmodule Kuroneko.Gadget.FunctionTest do
     def setup(_dir, _settings), do: raise("no such attribute")
   end
 
+  defmodule Restarting do
+    @moduledoc false
+    @behaviour Kuroneko.Gadget.Function
+
+    @impl true
+    def type, do: "ffs"
+
+    @impl true
+    def default_name, do: "restarting"
+
+    @impl true
+    def settings(_opts), do: {:ok, %{}}
+
+    @impl true
+    def endpoints(_settings), do: {1, 1}
+
+    @impl true
+    def setup(_dir, _settings), do: :ok
+
+    # Readied again, as a FunctionFS function whose process starts anew,
+    # it takes the gadget off the bus.
+    @impl true
+    def ready(dir, _settings) do
+      marker = Path.join(dir, "readied")
+
+      if File.exists?(marker),
+        do: File.write(Path.join(dir, "../../UDC"), ""),
+        else: File.write(marker, "")
+    end
+  end
+
   setup %{tmp_dir: tmp_dir} do
     %{gadget: gadget, udc_class: udc_class} = FakeConfigfs.gadget(tmp_dir)
 
@@ -145,12 +176,13 @@ defmodule Kuroneko.Gadget.FunctionTest do
     assert %{in: 6, out: 3} = Kuroneko.Gadget.endpoints_in_use(pid)
     assert calls(gadget) == ["ready midi.midi"]
 
+    # The same again: readied again, not made again.
     assert :ok = Kuroneko.Gadget.configure(pid, functions)
-    assert calls(gadget) == ["ready midi.midi"]
+    assert calls(gadget) == ["ready midi.midi", "ready midi.midi"]
 
     assert :ok = Kuroneko.Gadget.configure(pid, [{Midi, ports: 4}])
     assert FakeConfigfs.read(gadget, "functions/midi.midi/in_ports") == "4\n"
-    assert calls(gadget) == ["ready midi.midi", "teardown midi.midi", "ready midi.midi"]
+    assert Enum.take(calls(gadget), -2) == ["teardown midi.midi", "ready midi.midi"]
     refute File.exists?(Path.join(gadget, "functions/acm.serial"))
     refute File.exists?(Path.join(gadget, "configs/c.1/acm.serial"))
 
@@ -177,13 +209,13 @@ defmodule Kuroneko.Gadget.FunctionTest do
     assert FakeConfigfs.read(gadget, "functions/printer.printer/pnp_string") == "changed"
     assert FakeConfigfs.read(gadget, "functions/midi.keys/in_ports") == "1\n"
 
-    # A new process takes those there for those asked for.
+    # A new process takes those there for those asked for: readied, not made again.
     stop_supervised!(Kuroneko.Gadget)
     calls = calls(gadget)
 
     start_supervised!({Kuroneko.Gadget, [functions: [Printer, {Midi, name: "keys"}]] ++ options})
 
-    assert calls(gadget) == calls
+    assert calls(gadget) == calls ++ ["ready midi.keys"]
   end
 
   test "refuses what the modules refuse, and goes back when one fails", %{
@@ -217,6 +249,18 @@ defmodule Kuroneko.Gadget.FunctionTest do
 
     assert Kuroneko.Gadget.functions(pid) == [:keyboard]
     refute File.exists?(Path.join(gadget, "functions/acm.broken"))
+    assert FakeConfigfs.read(gadget, "UDC") == "udc.0"
+  end
+
+  test "readies a module's functions again when nothing changes, and connects again", %{
+    gadget: gadget,
+    pid: pid
+  } do
+    assert :ok = Kuroneko.Gadget.configure(pid, [Restarting])
+    assert FakeConfigfs.read(gadget, "UDC") == "udc.0"
+    assert File.exists?(Path.join(gadget, "functions/ffs.restarting/readied"))
+
+    assert :ok = Kuroneko.Gadget.configure(pid, [Restarting])
     assert FakeConfigfs.read(gadget, "UDC") == "udc.0"
   end
 

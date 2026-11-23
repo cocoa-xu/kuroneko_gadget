@@ -52,7 +52,10 @@ defmodule Kuroneko.Gadget.Function do
 
   @doc """
   Readies an instance in the configuration, each time before the gadget
-  connects: a FunctionFS function has its descriptors written.
+  connects and when the functions are configured again unchanged: a
+  FunctionFS function starts its process if it is not running. When this
+  takes the gadget off the bus, as FunctionFS does, the gadget connects
+  again.
   """
   @callback ready(dir :: Path.t(), settings()) :: :ok | {:error, term()}
 

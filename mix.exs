@@ -12,6 +12,10 @@ defmodule Kuroneko.Gadget.MixProject do
       description: description(),
       package: package(),
       source_url: @source_url,
+      compilers: [:elixir_make | Mix.compilers()],
+      make_targets: ["all"],
+      make_clean: ["clean"],
+      make_error_message: make_error_message(),
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
@@ -21,7 +25,7 @@ defmodule Kuroneko.Gadget.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    [mod: {Kuroneko.Gadget.Application, []}, extra_applications: [:logger]]
   end
 
   def cli do
@@ -40,12 +44,22 @@ defmodule Kuroneko.Gadget.MixProject do
     [
       licenses: ["Apache-2.0"],
       links: %{"GitHub" => @source_url},
-      files: ["lib", "mix.exs", "README.md", "CHANGELOG.md", "LICENSE", ".formatter.exs"]
+      files: [
+        "lib",
+        "c_src",
+        "Makefile",
+        "mix.exs",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        ".formatter.exs"
+      ]
     ]
   end
 
   defp deps do
     [
+      {:elixir_make, "~> 0.9", runtime: false},
       {:ex_doc, "~> 0.34", only: :docs, runtime: false},
       {:dialyxir, "~> 1.4", only: :test, runtime: false},
       {:credo, "~> 1.7", only: :test, runtime: false}
@@ -63,8 +77,20 @@ defmodule Kuroneko.Gadget.MixProject do
           Kuroneko.Gadget.HID.Keymap,
           Kuroneko.Gadget.HID.Report
         ],
-        "Mass storage": [Kuroneko.Gadget.Storage]
+        "Mass storage": [Kuroneko.Gadget.Storage],
+        "Functions of your own": [
+          Kuroneko.Gadget.Function,
+          Kuroneko.Gadget.FunctionFS,
+          Kuroneko.Gadget.Serial
+        ]
       ]
     ]
+  end
+
+  defp make_error_message do
+    """
+    Could not build kuroneko_ffs, the program of Kuroneko.Gadget.FunctionFS.
+    It needs a Linux C toolchain; Nerves provides one for its targets.
+    """
   end
 end

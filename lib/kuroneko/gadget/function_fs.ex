@@ -1,22 +1,66 @@
 defmodule Kuroneko.Gadget.FunctionFS do
   @moduledoc """
-  FunctionFS: a USB function whose interfaces and endpoints are a
-  program's, here what it writes to its `ep0` and reads back.
+  A USB function written in Elixir: its interfaces and endpoints as data,
+  its control requests and transfers as events, on the kernel's FunctionFS.
 
-  `layout/1` makes, from interfaces described as data, the descriptors and
-  strings that a function writes to `ep0` before the gadget connects, for
-  full and high speed, and tells which endpoint file (`ep1`, `ep2`...)
-  each endpoint is. `events/1` reads what `ep0` gives: the gadget bound and
-  enabled, a control request, suspend and resume.
+      defmodule Loopback do
+        use Kuroneko.Gadget.FunctionFS
+        alias Kuroneko.Gadget.FunctionFS
 
-      Kuroneko.Gadget.FunctionFS.layout([
-        [class: 0xFF, name: "Loopback", endpoints: [{:in, :bulk}, {:out, :bulk}]]
-      ])
-      #=> {:ok, %{descriptors: <<3, 0, 0, 0, ...>>, strings: <<2, 0, 0, 0, ...>>,
-      #=>         endpoints: [%{file: "ep1", interface: 0, direction: :in, type: :bulk},
-      #=>                     %{file: "ep2", interface: 0, direction: :out, type: :bulk}]}}
+        @impl FunctionFS
+        def interfaces(_settings),
+          do: [[name: "Loopback", endpoints: [{:in, :bulk}, {:out, :bulk}]]]
+
+        @impl FunctionFS
+        def handle_event(:enable, state) do
+          FunctionFS.read(self(), 2, 512)
+          {:noreply, state}
+        end
+
+        def handle_event({:data, 2, data}, state) do
+          FunctionFS.write(self(), 1, data)
+          FunctionFS.read(self(), 2, 512)
+          {:noreply, state}
+        end
+
+        def handle_event({:setup, %{type: :vendor, direction: :in, length: length}}, state) do
+          FunctionFS.answer(self(), binary_part("Kuroneko", 0, min(length, 8)))
+          {:noreply, state}
+        end
+
+        def handle_event(event, state), do: super(event, state)
+      end
+
+      Kuroneko.Gadget.configure([:keyboard, :mouse, Loopback])
+
+  A module that uses this one is a function of `Kuroneko.Gadget.Function`,
+  of the type `"ffs"`: `Loopback`, or `{Loopback, name: "loop2", ...}` with
+  its settings, the options besides `:name`. Its endpoints, numbered from 1
+  in the order of `c:interfaces/1`, count against the controller's.
+
+  Each instance runs in a process of its own, which calls the module's
+  callbacks: `c:init/1` with the settings, then `c:handle_event/2` with what
+  happens on the bus and to the transfers asked for, and `c:handle_info/2`
+  with other messages. `write/3`, `read/3`, `answer/2` and `stall/1` ask the
+  process for transfers, from the callbacks (`self()`) or from anywhere
+  (`whereis/2`); their results come back as events.
+
+  The process starts when the gadget readies the function, before it
+  connects, and stops when the function is removed. An exception in a
+  callback is logged and the function goes on. When the process goes for
+  another reason, the function stays on the bus without its endpoints until
+  the functions are configured again.
+
+  `layout/1` and `events/1` are the descriptors and events themselves, for
+  programs of your own.
   """
   import Bitwise
+
+  require Logger
+
+  alias __MODULE__, as: FunctionFS
+  alias Kuroneko.Gadget.Function, as: GadgetFunction
+  alias Kuroneko.Gadget.FunctionFS.Server
 
   @descriptors_magic_v2 3
   @strings_magic 2
@@ -28,6 +72,8 @@ defmodule Kuroneko.Gadget.FunctionFS do
   @syncs %{none: 0, async: 1, adaptive: 2, sync: 3}
   @intervals [1, 2, 4, 8, 16, 32, 64, 128]
   @events %{0 => :bind, 1 => :unbind, 2 => :enable, 3 => :disable, 5 => :suspend, 6 => :resume}
+  @registry Kuroneko.Gadget.FunctionFS.Registry
+  @supervisor Kuroneko.Gadget.FunctionFS.Supervisor
 
   @typedoc """
   An endpoint: its direction and transfer type, with options:
@@ -41,6 +87,7 @@ defmodule Kuroneko.Gadget.FunctionFS do
       served, in milliseconds: 1, 2, 4... up to 128, 1 by default
     * `:sync` - an isochronous endpoint's synchronization: `:none`,
       `:async` (the default), `:adaptive` or `:sync`
+    * `:extra` - class-specific descriptors after the endpoint's, binaries
   """
   @type endpoint() ::
           {:in | :out, :bulk | :interrupt | :isochronous}
@@ -48,13 +95,15 @@ defmodule Kuroneko.Gadget.FunctionFS do
 
   @typedoc """
   An interface: `:class`, `:subclass` and `:protocol` (0xFF, 0 and 0 by
-  default, vendor-specific), `:name`, which the host may show, and its
-  `:endpoints`.
+  default, vendor-specific), `:name`, which the host may show, `:extra`,
+  class-specific descriptors between the interface's and its endpoints'
+  (binaries), and its `:endpoints`.
   """
   @type interface() :: keyword()
 
-  @typedoc "Where an endpoint is, see `layout/1`."
+  @typedoc "An endpoint's number and file, see `layout/1`."
   @type endpoint_file() :: %{
+          number: pos_integer(),
           file: String.t(),
           interface: non_neg_integer(),
           direction: :in | :out,
@@ -72,12 +121,137 @@ defmodule Kuroneko.Gadget.FunctionFS do
           length: char()
         }
 
+  @typedoc """
+  What happens to the function:
+
+    * `:bind`, `:unbind` - the gadget takes the function on and off the bus
+    * `:enable`, `:disable` - the host starts and stops using it: its
+      endpoints carry data in between
+    * `:suspend`, `:resume` - the bus sleeps and wakes
+    * `{:setup, request}` - a control request to the function, which waits
+      for `answer/2` or `stall/1`, two seconds at most, then is stalled
+    * `{:control_data, data}` - the data an OUT request carried, read by
+      `answer/2`
+    * `{:control_error, reason}` - an answer or stall the host did not take
+    * `{:data, endpoint, data}` - what a `read/3` got
+    * `{:written, endpoint, bytes}` - a `write/3` done
+    * `{:error, endpoint, reason}` - a read or write that failed, such as
+      `:eshutdown` when the host disables the function
+  """
   @type event() ::
-          :bind | :unbind | :enable | :disable | :suspend | :resume | {:setup, request()}
+          :bind
+          | :unbind
+          | :enable
+          | :disable
+          | :suspend
+          | :resume
+          | {:setup, request()}
+          | {:control_data, binary()}
+          | {:control_error, term()}
+          | {:data, pos_integer(), binary()}
+          | {:written, pos_integer(), non_neg_integer()}
+          | {:error, non_neg_integer(), term()}
+
+  @doc "The function's interfaces for these settings."
+  @callback interfaces(settings :: term()) :: [interface()]
+
+  @doc "The process's state at start, from the settings; the settings by default."
+  @callback init(settings :: term()) :: {:ok, state :: term()} | {:error, term()}
+
+  @doc "Handles an event; by default control requests are stalled and the rest ignored."
+  @callback handle_event(event(), state :: term()) :: {:noreply, state :: term()}
+
+  @doc "Handles another message to the process."
+  @callback handle_info(message :: term(), state :: term()) :: {:noreply, state :: term()}
+
+  @optional_callbacks init: 1, handle_event: 2, handle_info: 2
+
+  @doc false
+  defmacro __using__(_opts) do
+    quote do
+      @behaviour GadgetFunction
+      @behaviour FunctionFS
+
+      @impl GadgetFunction
+      def type, do: "ffs"
+
+      @impl GadgetFunction
+      def default_name, do: FunctionFS.default_name(__MODULE__)
+
+      @impl GadgetFunction
+      def settings(opts), do: FunctionFS.settings(__MODULE__, opts)
+
+      @impl GadgetFunction
+      def endpoints(settings), do: FunctionFS.endpoints(interfaces(settings))
+
+      @impl GadgetFunction
+      def setup(_dir, _settings), do: :ok
+
+      @impl GadgetFunction
+      def ready(dir, settings), do: FunctionFS.ready(__MODULE__, dir, settings)
+
+      @impl GadgetFunction
+      def teardown(dir, _settings), do: FunctionFS.teardown(dir)
+
+      @impl FunctionFS
+      def init(settings), do: {:ok, settings}
+
+      @impl FunctionFS
+      def handle_event(event, state), do: FunctionFS.default_event(event, state)
+
+      defoverridable default_name: 0, settings: 1, init: 1, handle_event: 2
+    end
+  end
+
+  @doc """
+  Writes data to an IN endpoint, for the host to read: `{:written,
+  endpoint, bytes}` follows. An empty binary is a packet of zero length.
+  """
+  @spec write(GenServer.server(), pos_integer(), binary()) :: :ok
+  def write(server, endpoint, data), do: GenServer.cast(server, {:write, endpoint, data})
+
+  @doc """
+  Reads up to `size` bytes, a multiple of the packet size best, from an OUT
+  endpoint: `{:data, endpoint, data}` follows when the host sends them.
+  """
+  @spec read(GenServer.server(), pos_integer(), non_neg_integer()) :: :ok
+  def read(server, endpoint, size), do: GenServer.cast(server, {:read, endpoint, size})
+
+  @doc """
+  Answers the control request waiting: an IN request with the data to send,
+  an OUT one by reading the data it carries, which comes as
+  `{:control_data, data}`.
+  """
+  @spec answer(GenServer.server(), binary()) :: :ok
+  def answer(server, data \\ <<>>), do: GenServer.cast(server, {:answer, data})
+
+  @doc "Refuses the control request waiting."
+  @spec stall(GenServer.server()) :: :ok
+  def stall(server), do: GenServer.cast(server, :stall)
+
+  @doc """
+  The process of a module's function: the default instance, or the one
+  `:name` names. Takes the `:gadget` option.
+  """
+  @spec whereis(module(), keyword()) :: pid() | nil
+  def whereis(module, opts \\ []) do
+    case Registry.lookup(@registry, Kuroneko.Gadget.function_dir(module, opts)) do
+      [{pid, _value}] -> pid
+      [] -> nil
+    end
+  end
 
   @doc """
   The descriptors and strings of these interfaces, to write to `ep0` in
-  this order, and their endpoints' files, numbered in order from `ep1`.
+  this order, and their endpoints, numbered in order from 1, with their
+  files.
+
+      Kuroneko.Gadget.FunctionFS.layout([
+        [class: 0xFF, name: "Loopback", endpoints: [{:in, :bulk}, {:out, :bulk}]]
+      ])
+      #=> {:ok, %{descriptors: <<3, 0, 0, 0, ...>>, strings: <<2, 0, 0, 0, ...>>,
+      #=>         endpoints: [%{number: 1, file: "ep1", interface: 0, direction: :in, type: :bulk},
+      #=>                     %{number: 2, file: "ep2", interface: 0, direction: :out, type: :bulk}]}}
   """
   @spec layout([interface()]) ::
           {:ok, %{descriptors: binary(), strings: binary(), endpoints: [endpoint_file()]}}
@@ -90,6 +264,7 @@ defmodule Kuroneko.Gadget.FunctionFS do
       files =
         for interface <- numbered, endpoint <- interface.endpoints do
           %{
+            number: endpoint.number,
             file: "ep#{endpoint.number}",
             interface: interface.number,
             direction: endpoint.direction,
@@ -113,6 +288,150 @@ defmodule Kuroneko.Gadget.FunctionFS do
 
   def events(_rest), do: []
 
+  @doc false
+  @spec default_name(module()) :: String.t()
+  def default_name(module), do: module |> Module.split() |> List.last() |> Macro.underscore()
+
+  @doc false
+  @spec settings(module(), keyword()) :: {:ok, map()} | {:error, term()}
+  def settings(module, opts) do
+    settings = Map.new(opts)
+
+    with {:ok, _layout} <- layout(module.interfaces(settings)), do: {:ok, settings}
+  end
+
+  @doc false
+  @spec endpoints([interface()]) :: {non_neg_integer(), non_neg_integer()}
+  def endpoints(interfaces) do
+    {:ok, %{endpoints: endpoints}} = layout(interfaces)
+
+    {Enum.count(endpoints, &(&1.direction == :in)),
+     Enum.count(endpoints, &(&1.direction == :out))}
+  end
+
+  @doc false
+  @spec default_event(event(), term()) :: {:noreply, term()}
+  def default_event({:setup, _request}, state) do
+    stall(self())
+    {:noreply, state}
+  end
+
+  def default_event(_event, state), do: {:noreply, state}
+
+  @doc false
+  @spec ready(module(), Path.t(), term()) :: :ok | {:error, term()}
+  def ready(module, dir, settings) do
+    with [] <- Registry.lookup(@registry, dir),
+         {:ok, _pid} <-
+           DynamicSupervisor.start_child(@supervisor, {Server, {module, dir, settings}}) do
+      :ok
+    else
+      [{_pid, _value}] -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc false
+  @spec teardown(Path.t()) :: :ok | {:error, term()}
+  def teardown(dir) do
+    :ok = stop_server(dir)
+    umount(mount_dir(dir))
+  end
+
+  defp stop_server(dir) do
+    with [{pid, _value}] <- Registry.lookup(@registry, dir),
+         :ok <- DynamicSupervisor.terminate_child(@supervisor, pid) do
+      :ok
+    else
+      _none_or_gone -> :ok
+    end
+  end
+
+  # The function's FunctionFS: the kernel names it after the instance, and
+  # each instance's name is the system's only one.
+  @doc false
+  @spec mount_dir(Path.t()) :: Path.t()
+  def mount_dir(dir) do
+    "ffs." <> instance = Path.basename(dir)
+    "/dev/ffs-" <> instance
+  end
+
+  # Closing ep0 while the gadget is on the bus would take the whole gadget
+  # off: no_disconnect leaves the others working.
+  @doc false
+  @spec mount(Path.t()) :: :ok | {:error, term()}
+  def mount(dir) do
+    target = mount_dir(dir)
+    "ffs." <> instance = Path.basename(dir)
+
+    if mounted?(target) do
+      :ok
+    else
+      with :ok <- File.mkdir_p(target),
+           {_output, 0} <-
+             System.cmd("mount", ["-t", "functionfs", "-o", "no_disconnect=1", instance, target],
+               stderr_to_stdout: true
+             ) do
+        :ok
+      else
+        {:error, reason} -> {:error, reason}
+        {output, status} -> {:error, {:mount, status, String.trim(output)}}
+      end
+    end
+  end
+
+  defp umount(target) do
+    if mounted?(target) do
+      case umount_retrying(target, 20) do
+        :ok ->
+          _ = File.rmdir(target)
+          :ok
+
+        error ->
+          error
+      end
+    else
+      _ = File.rmdir(target)
+      :ok
+    end
+  end
+
+  # The program's files close as it exits, a moment after it is told to.
+  defp umount_retrying(target, tries) do
+    case System.cmd("umount", [target], stderr_to_stdout: true) do
+      {_output, 0} ->
+        :ok
+
+      {output, status} when tries > 1 ->
+        Logger.debug("kuroneko_gadget: umount #{target}: #{String.trim(output)} (#{status})")
+        Process.sleep(100)
+        umount_retrying(target, tries - 1)
+
+      {output, status} ->
+        {:error, {:umount, status, String.trim(output)}}
+    end
+  end
+
+  defp mounted?(target) do
+    case File.read("/proc/mounts") do
+      {:ok, mounts} ->
+        mounts
+        |> String.split("\n", trim: true)
+        |> Enum.any?(&match?([_source, ^target | _rest], String.split(&1, " ")))
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  @doc false
+  @spec program() :: {:ok, Path.t()} | {:error, :no_program}
+  def program do
+    path = Application.app_dir(:kuroneko_gadget, ["priv", "kuroneko_ffs"])
+    if File.exists?(path), do: {:ok, path}, else: {:error, :no_program}
+  end
+
   defp event(4, <<request_type, request, value::little-16, index::little-16, length::little-16>>) do
     {:setup,
      %{
@@ -130,14 +449,15 @@ defmodule Kuroneko.Gadget.FunctionFS do
   defp event(type, _setup), do: Map.get(@events, type, {:unknown, type})
 
   defp interface({opts, number}) do
-    known = [:class, :subclass, :protocol, :name, :endpoints]
+    known = [:class, :subclass, :protocol, :name, :extra, :endpoints]
 
     with true <- Keyword.keyword?(opts) || {:error, {:invalid_interface, opts}},
          [] <- Keyword.keys(opts) -- known,
          {:ok, codes} <- codes(opts),
          {:ok, name} <- name(opts[:name]),
+         {:ok, extra} <- extra(Keyword.get(opts, :extra, [])),
          {:ok, endpoints} <- collect(Keyword.get(opts, :endpoints, []), &endpoint/1) do
-      {:ok, Map.merge(codes, %{number: number, name: name, endpoints: endpoints})}
+      {:ok, Map.merge(codes, %{number: number, name: name, extra: extra, endpoints: endpoints})}
     else
       [_ | _] = unknown -> {:error, {:unknown_options, :interface, unknown}}
       error -> error
@@ -167,11 +487,40 @@ defmodule Kuroneko.Gadget.FunctionFS do
 
   defp name(name), do: {:error, {:invalid_name, name}}
 
+  # Descriptors, each starting with its length: as many as they hold.
+  defp extra(descriptors) when is_list(descriptors) do
+    collect(descriptors, fn binary ->
+      case split_descriptors(binary) do
+        {:ok, split} -> {:ok, split}
+        :error -> {:error, {:invalid_descriptor, binary}}
+      end
+    end)
+    |> case do
+      {:ok, split} -> {:ok, List.flatten(split)}
+      error -> error
+    end
+  end
+
+  defp extra(other), do: {:error, {:invalid_descriptor, other}}
+
+  defp split_descriptors(<<>>), do: {:ok, []}
+
+  defp split_descriptors(<<length, _type, _rest::binary>> = binary)
+       when length >= 2 and byte_size(binary) >= length do
+    <<descriptor::binary-size(^length), rest::binary>> = binary
+
+    with {:ok, others} <- split_descriptors(rest), do: {:ok, [descriptor | others]}
+  end
+
+  defp split_descriptors(_binary), do: :error
+
   defp endpoint({direction, type}) when direction in [:in, :out] and is_map_key(@types, type),
     do: endpoint({direction, type, []})
 
   defp endpoint({direction, type, opts} = spec)
        when direction in [:in, :out] and is_map_key(@types, type) and is_list(opts) do
+    known = [:max_packet, :interval, :sync, :extra]
+
     endpoint = %{
       direction: direction,
       type: type,
@@ -181,8 +530,8 @@ defmodule Kuroneko.Gadget.FunctionFS do
     }
 
     cond do
-      Keyword.keys(opts) -- [:max_packet, :interval, :sync] != [] ->
-        {:error, {:unknown_options, spec, Keyword.keys(opts) -- [:max_packet, :interval, :sync]}}
+      Keyword.keys(opts) -- known != [] ->
+        {:error, {:unknown_options, spec, Keyword.keys(opts) -- known}}
 
       not valid_packet?(type, endpoint.max_packet) ->
         {:error, {:invalid_max_packet, spec}}
@@ -194,7 +543,8 @@ defmodule Kuroneko.Gadget.FunctionFS do
         {:error, {:invalid_sync, spec}}
 
       true ->
-        {:ok, endpoint}
+        with {:ok, extra} <- extra(Keyword.get(opts, :extra, [])),
+             do: {:ok, Map.put(endpoint, :extra, extra)}
     end
   end
 
@@ -243,8 +593,9 @@ defmodule Kuroneko.Gadget.FunctionFS do
     [
       <<9, 4, interface.number, 0, length(interface.endpoints), interface.class,
         interface.subclass, interface.protocol, string>>
-      | Enum.map(interface.endpoints, &endpoint_descriptor(&1, speed))
-    ]
+    ] ++
+      interface.extra ++
+      Enum.flat_map(interface.endpoints, &[endpoint_descriptor(&1, speed) | &1.extra])
   end
 
   defp endpoint_descriptor(endpoint, speed) do

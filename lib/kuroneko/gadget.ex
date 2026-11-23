@@ -926,8 +926,22 @@ defmodule Kuroneko.Gadget do
              &(managing_networks?(state, functions) or &1.kind != :network)
            ),
          :ok <- check_endpoints(wanted ++ others, state.endpoints),
-         :ok <- if(wanted == present, do: :ok, else: change(state, present, wanted)) do
+         :ok <-
+           if(wanted == present,
+             do: ready_again(state, wanted),
+             else: change(state, present, wanted)
+           ) do
       {:ok, modules(wanted)}
+    end
+  end
+
+  # Modules' functions readied again, such as one whose process went: when
+  # that takes the gadget off the bus, it connects again.
+  defp ready_again(state, wanted) do
+    udc = bound_udc(state.gadget)
+
+    with :ok <- each(wanted, &ready(state, &1)) do
+      if udc != "" and bound_udc(state.gadget) == "", do: bind(state, udc), else: :ok
     end
   end
 
