@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 (2026-11-23)
 
 * Several functions of a kind, each with a name: two storage functions,
   two networks, two keyboards; `Kuroneko.Gadget.instances/1` tells them
