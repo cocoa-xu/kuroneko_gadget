@@ -2,6 +2,7 @@ defmodule Kuroneko.GadgetTest do
   use ExUnit.Case, async: true
 
   alias Kuroneko.Gadget.FakeConfigfs
+  alias Kuroneko.Gadget.HID
 
   doctest Kuroneko.Gadget
 
@@ -47,7 +48,9 @@ defmodule Kuroneko.GadgetTest do
     assert FakeConfigfs.read(gadget, "functions/hid.mouse/report_length") == "62"
     assert FakeConfigfs.read(gadget, "functions/hid.relative_mouse/subclass") == "1"
     assert FakeConfigfs.read(gadget, "functions/hid.relative_mouse/report_length") == "5"
-    assert Kuroneko.Gadget.hid_device(:relative_mouse, gadget: gadget) == {:error, :enoent}
+
+    assert {:error, {:configfs, _path, :enoent}} =
+             HID.device(name: "relative_mouse", gadget: gadget)
 
     # The mode is read back from the report descriptor.
     File.write!(Path.join(gadget, "UDC"), "untouched")
@@ -69,8 +72,13 @@ defmodule Kuroneko.GadgetTest do
   end
 
   test "removes the functions not asked for", %{gadget: gadget, udc_class: udc_class} do
-    # configfs removes attributes with their function: here only empty ones go.
     File.mkdir_p!(Path.join(gadget, "functions/hid.mouse"))
+
+    :ok =
+      HID.setup(
+        Path.join(gadget, "functions/hid.mouse"),
+        HID.descriptor(:stylus)
+      )
 
     File.ln_s!(
       Path.join(gadget, "functions/hid.mouse"),
@@ -129,7 +137,7 @@ defmodule Kuroneko.GadgetTest do
     assert FakeConfigfs.read(gadget, "functions/uac2.audio/c_alt0_name") == "Kuroneko Speaker"
     assert FakeConfigfs.read(gadget, "functions/uac2.audio/int_ep_present") == "0"
     # The kernel's name for what is not named.
-    assert FakeConfigfs.read(gadget, "functions/uac2.audio/function_name") == "Source/Sink\n"
+    assert FakeConfigfs.read(gadget, "functions/uac2.audio/function_name") == "Source/Sink"
     refute File.exists?(Path.join(dir, "p_alt0_name"))
   end
 
@@ -156,10 +164,9 @@ defmodule Kuroneko.GadgetTest do
   end
 
   test "refuses names that are not text", %{gadget: gadget} do
-    Process.flag(:trap_exit, true)
-
-    assert {:error, {%ArgumentError{}, _stack}} =
-             Kuroneko.Gadget.start_link(names: [storage: "Kuroneko"], gadget: gadget, name: nil)
+    assert_raise ArgumentError, fn ->
+      Kuroneko.Gadget.start_link(names: [storage: "Kuroneko"], gadget: gadget, name: nil)
+    end
   end
 
   test "a microphone alone leaves the speaker direction out", %{
@@ -184,8 +191,9 @@ defmodule Kuroneko.GadgetTest do
     File.mkdir_p!(dir)
     File.ln_s!(dir, Path.join(gadget, "configs/c.1/uac2.audio"))
     File.write!(Path.join(dir, "p_chmask"), "1\n")
-    File.write!(Path.join(dir, "p_srate"), "44100,48000\n")
+    File.write!(Path.join(dir, "p_srate"), "48000,44100\n")
     File.write!(Path.join(dir, "p_ssize"), "2\n")
+    File.write!(Path.join(dir, "p_hs_bint"), "4\n")
     File.write!(Path.join(dir, "c_chmask"), "0\n")
     # A rebind would rewrite the controller's name.
     File.write!(Path.join(gadget, "UDC"), "untouched")
@@ -201,9 +209,8 @@ defmodule Kuroneko.GadgetTest do
 
     assert Kuroneko.Gadget.functions(pid) == [:microphone]
 
-    assert Kuroneko.Gadget.audio(pid) == %{
-             microphone: %{channels: 1, rates: [44_100, 48_000], sample_bits: 16}
-           }
+    assert %{microphone: %{channels: 1, rates: [48_000, 44_100], sample_bits: 16}, speaker: nil} =
+             Enum.find(Kuroneko.Gadget.instances(pid), &(&1.kind == :audio))
 
     assert FakeConfigfs.read(gadget, "UDC") == "untouched"
   end
@@ -233,10 +240,10 @@ defmodule Kuroneko.GadgetTest do
     # 97 frames of 8 bytes each 500 µs do not, 49 each 250 µs do.
     assert FakeConfigfs.read(gadget, "functions/uac2.audio/c_hs_bint") == "2"
 
-    assert Kuroneko.Gadget.audio(pid) == %{
+    assert %{
              microphone: %{channels: 1, rates: [48_000, 44_100, 96_000], sample_bits: 24},
              speaker: %{channels: 2, rates: [192_000], sample_bits: 32}
-           }
+           } = Enum.find(Kuroneko.Gadget.instances(pid), &(&1.kind == :audio))
   end
 
   test "takes packets as large as high speed carries by default", %{
@@ -313,7 +320,7 @@ defmodule Kuroneko.GadgetTest do
     File.rm!(Path.join(gadget, "UDC"))
     File.mkdir!(Path.join(gadget, "UDC"))
 
-    assert {:error, :eisdir} = Kuroneko.Gadget.configure(pid, [:microphone])
+    assert {:error, {:configfs, _udc, :eisdir}} = Kuroneko.Gadget.configure(pid, [:microphone])
     assert Kuroneko.Gadget.functions(pid) == []
     refute File.exists?(Path.join(gadget, "configs/c.1/uac2.audio"))
   end
@@ -322,10 +329,9 @@ defmodule Kuroneko.GadgetTest do
     pid = start_supervised!({Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, name: nil})
     assert Kuroneko.Gadget.configure(pid, [:camera]) == {:error, {:unknown_function, :camera}}
 
-    Process.flag(:trap_exit, true)
-
-    assert {:error, {%ArgumentError{}, _stack}} =
-             Kuroneko.Gadget.start_link(functions: [:camera], gadget: gadget, name: nil)
+    assert_raise ArgumentError, fn ->
+      Kuroneko.Gadget.start_link(functions: [:camera], gadget: gadget, name: nil)
+    end
   end
 
   test "tells the state of the connection to the target", %{gadget: gadget, udc_class: udc_class} do
@@ -430,13 +436,7 @@ defmodule Kuroneko.GadgetTest do
     end
 
     test "gives the device's end another address with a new function", context do
-      # configfs takes the attributes away with the function.
-      rmdir = fn dir ->
-        File.rm_rf!(dir)
-        :ok
-      end
-
-      pid = start_usb(context, rmdir: rmdir)
+      pid = start_usb(context)
 
       assert :ok =
                Kuroneko.Gadget.set_network_addresses(pid,
@@ -526,9 +526,11 @@ defmodule Kuroneko.GadgetTest do
 
     @tag capture_log: true
     test "connects the functions again when the new function fails", context do
-      # A plain directory with attributes cannot go.
       pid = start_usb(context)
       File.write!(Path.join(context.gadget, "UDC"), "")
+      functions = Path.join(context.gadget, "functions")
+      File.chmod!(functions, 0o555)
+      on_exit(fn -> File.chmod!(functions, 0o755) end)
 
       assert {:error, _reason} =
                Kuroneko.Gadget.set_network_addresses(pid, device_address: "02:00:00:00:00:01")
@@ -554,12 +556,6 @@ defmodule Kuroneko.GadgetTest do
   end
 
   describe "several of a kind" do
-    # configfs takes a function's attributes and LUNs with it.
-    defp rm_rf(dir) do
-      File.rm_rf!(dir)
-      :ok
-    end
-
     test "a storage function with several LUNs keeps their media when it changes", %{
       gadget: gadget,
       udc_class: udc_class
@@ -567,11 +563,7 @@ defmodule Kuroneko.GadgetTest do
       pid =
         start_supervised!(
           {Kuroneko.Gadget,
-           functions: [{:storage, luns: 2}],
-           gadget: gadget,
-           udc_class: udc_class,
-           rmdir: &rm_rf/1,
-           name: nil}
+           functions: [{:storage, luns: 2}], gadget: gadget, udc_class: udc_class, name: nil}
         )
 
       for drive <- 0..1,
@@ -593,7 +585,7 @@ defmodule Kuroneko.GadgetTest do
       assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.1/cdrom") == "1"
 
       assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.1/file") ==
-               "/data/images/debian.iso"
+               "/data/images/debian.iso\n"
 
       assert FakeConfigfs.read(gadget, "functions/mass_storage.disk/lun.2/cdrom") == "0"
 
@@ -639,9 +631,7 @@ defmodule Kuroneko.GadgetTest do
       File.write!(Path.join(gadget, "strings/0x409/serialnumber"), "0123456789abcdef\n")
 
       pid =
-        start_supervised!(
-          {Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, rmdir: &rm_rf/1, name: nil}
-        )
+        start_supervised!({Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, name: nil})
 
       assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard])
       assert File.exists?(Path.join(gadget, "configs/c.1/ncm.usb0"))
@@ -677,7 +667,7 @@ defmodule Kuroneko.GadgetTest do
       pid =
         start_supervised!(
           {Kuroneko.Gadget,
-           gadget: gadget, udc_class: udc_class, rmdir: &rm_rf/1, manage_networks: true, name: nil}
+           gadget: gadget, udc_class: udc_class, manage_networks: true, name: nil}
         )
 
       assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard, :storage])

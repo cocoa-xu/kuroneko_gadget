@@ -25,25 +25,34 @@ defmodule Kuroneko.Gadget.MixProject do
   end
 
   def application do
-    [mod: {Kuroneko.Gadget.Application, []}, extra_applications: [:logger]]
+    [mod: {Kuroneko.Gadget.Application, []}, extra_applications: [:logger, :crypto]]
   end
 
   def cli do
-    [preferred_envs: [docs: :docs, "hex.build": :docs, dialyzer: :test, credo: :test]]
+    [
+      preferred_envs: [
+        docs: :docs,
+        "hex.build": :docs,
+        "hex.publish": :docs,
+        dialyzer: :test,
+        credo: :test
+      ]
+    ]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_env), do: ["lib"]
 
   defp description do
-    "The USB side of a KVM on Linux: keyboard, mouse, pen and touch screen, mass storage, " <>
-      "a two-way USB sound card and the USB network's addresses, on a configfs USB gadget."
+    "The USB side of a KVM on Linux, with a module for each USB gadget function driver: " <>
+      "HID keyboards, mice and pens, mass storage drives and discs, a USB sound card, " <>
+      "network, serial ports, and functions written in Elixir on FunctionFS."
   end
 
   defp package do
     [
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => @source_url},
+      links: %{"GitHub" => @source_url, "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"},
       files: [
         "lib",
         "c_src",
@@ -72,16 +81,19 @@ defmodule Kuroneko.Gadget.MixProject do
       extras: ["README.md", "CHANGELOG.md", "LICENSE"],
       source_ref: "v#{@version}",
       groups_for_modules: [
-        "Keyboard and mouse": [
+        Functions: [
+          Kuroneko.Gadget.Function,
           Kuroneko.Gadget.HID,
+          Kuroneko.Gadget.MassStorage,
+          Kuroneko.Gadget.NCM,
+          Kuroneko.Gadget.UAC2,
+          Kuroneko.Gadget.ACM,
+          Kuroneko.Gadget.FunctionFS
+        ],
+        "Keyboard and mouse": [
+          Kuroneko.Gadget.Input,
           Kuroneko.Gadget.HID.Keymap,
           Kuroneko.Gadget.HID.Report
-        ],
-        "Mass storage": [Kuroneko.Gadget.Storage],
-        "Functions of your own": [
-          Kuroneko.Gadget.Function,
-          Kuroneko.Gadget.FunctionFS,
-          Kuroneko.Gadget.Serial
         ]
       ]
     ]

@@ -1,16 +1,5 @@
 defmodule Kuroneko.Gadget.HID.Descriptor do
   @moduledoc false
-  # The HID functions Kuroneko.Gadget creates. The reports are
-  # Kuroneko.Gadget.HID.Report.
-
-  @type t() :: %{
-          protocol: 0..2,
-          subclass: 0..1,
-          report_length: pos_integer(),
-          report_desc: binary()
-        }
-
-  @type pointer_mode() :: Kuroneko.Gadget.HID.pointer_mode()
 
   # Boot keyboard: modifiers, reserved, 6 keys of usages 0..0xE7 (the
   # logical maximum in two bytes: one would read as negative); LED output.
@@ -59,22 +48,14 @@ defmodule Kuroneko.Gadget.HID.Descriptor do
              "050D1500250A750895010954810285040955B102C0"
          )
 
-  @spec keyboard() :: t()
-  def keyboard, do: %{protocol: 1, subclass: 1, report_length: 8, report_desc: @keyboard}
+  @spec builtin(Kuroneko.Gadget.HID.builtin()) :: Kuroneko.Gadget.HID.descriptor()
+  def builtin(:keyboard),
+    do: %{protocol: 1, subclass: 1, report_length: 8, report_desc: @keyboard}
 
-  @spec relative_mouse() :: t()
-  def relative_mouse,
+  def builtin(:mouse), do: %{protocol: 2, subclass: 0, report_length: 7, report_desc: @mouse}
+  def builtin(:stylus), do: %{protocol: 0, subclass: 0, report_length: 7, report_desc: @stylus}
+  def builtin(:touch), do: %{protocol: 0, subclass: 0, report_length: 62, report_desc: @touch}
+
+  def builtin(:relative_mouse),
     do: %{protocol: 2, subclass: 1, report_length: 5, report_desc: @relative_mouse}
-
-  @spec mouse(pointer_mode()) :: t()
-  def mouse(:absolute), do: %{protocol: 2, subclass: 0, report_length: 7, report_desc: @mouse}
-  def mouse(:stylus), do: %{protocol: 0, subclass: 0, report_length: 7, report_desc: @stylus}
-  def mouse(:touch), do: %{protocol: 0, subclass: 0, report_length: 62, report_desc: @touch}
-
-  @doc "The pointer mode of a report descriptor, `nil` for another one."
-  @spec pointer_mode(binary()) :: pointer_mode() | nil
-  def pointer_mode(@mouse), do: :absolute
-  def pointer_mode(@stylus), do: :stylus
-  def pointer_mode(@touch), do: :touch
-  def pointer_mode(_report_desc), do: nil
 end

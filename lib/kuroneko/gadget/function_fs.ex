@@ -162,7 +162,7 @@ defmodule Kuroneko.Gadget.FunctionFS do
       @impl GadgetFunction
       def endpoints(settings) do
         {:ok, %{directions: directions}} = EP0.encode(interfaces(settings))
-        {Enum.count(directions, &(&1 == :in)), Enum.count(directions, &(&1 == :out))}
+        %{in: Enum.count(directions, &(&1 == :in)), out: Enum.count(directions, &(&1 == :out))}
       end
 
       @impl GadgetFunction

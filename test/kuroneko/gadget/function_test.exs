@@ -1,8 +1,8 @@
 defmodule Kuroneko.Gadget.FunctionTest do
   use ExUnit.Case, async: true
 
+  alias Kuroneko.Gadget.ACM
   alias Kuroneko.Gadget.FakeConfigfs
-  alias Kuroneko.Gadget.Serial
 
   @moduletag :tmp_dir
 
@@ -26,7 +26,7 @@ defmodule Kuroneko.Gadget.FunctionTest do
     end
 
     @impl true
-    def endpoints(_settings), do: {1, 1}
+    def endpoints(_settings), do: %{in: 1, out: 1}
 
     @impl true
     def setup(dir, %{ports: ports}) do
@@ -58,7 +58,7 @@ defmodule Kuroneko.Gadget.FunctionTest do
     def settings(opts), do: {:ok, %{pnp: Keyword.get(opts, :pnp, "MFG:Kuroneko;")}}
 
     @impl true
-    def endpoints(_settings), do: {1, 1}
+    def endpoints(_settings), do: %{in: 1, out: 1}
 
     @impl true
     def setup(dir, %{pnp: pnp}), do: File.write(Path.join(dir, "pnp_string"), pnp)
@@ -78,7 +78,7 @@ defmodule Kuroneko.Gadget.FunctionTest do
     def settings(_opts), do: {:ok, %{}}
 
     @impl true
-    def endpoints(_settings), do: {2, 1}
+    def endpoints(_settings), do: %{in: 2, out: 1}
 
     @impl true
     def setup(_dir, _settings), do: raise("no such attribute")
@@ -98,7 +98,7 @@ defmodule Kuroneko.Gadget.FunctionTest do
     def settings(_opts), do: {:ok, %{}}
 
     @impl true
-    def endpoints(_settings), do: {1, 1}
+    def endpoints(_settings), do: %{in: 1, out: 1}
 
     @impl true
     def setup(_dir, _settings), do: :ok
@@ -122,18 +122,11 @@ defmodule Kuroneko.Gadget.FunctionTest do
       gadget: gadget,
       udc_class: udc_class,
       endpoints: %{in: 7, out: 7},
-      rmdir: &rm_rf/1,
       name: nil
     ]
 
     pid = start_supervised!({Kuroneko.Gadget, options})
     %{gadget: gadget, options: options, pid: pid}
-  end
-
-  # configfs takes a function's attributes with it.
-  defp rm_rf(dir) do
-    File.rm_rf!(dir)
-    :ok
   end
 
   defp calls(gadget) do
@@ -147,19 +140,17 @@ defmodule Kuroneko.Gadget.FunctionTest do
     gadget: gadget,
     pid: pid
   } do
-    functions = [:keyboard, {Midi, ports: 2}, Serial]
+    functions = [:keyboard, {Midi, ports: 2}, ACM]
     assert :ok = Kuroneko.Gadget.configure(pid, functions)
 
-    assert Kuroneko.Gadget.functions(pid) == [:keyboard, Serial, Midi]
+    assert Kuroneko.Gadget.functions(pid) == [:keyboard, ACM, Midi]
     assert FakeConfigfs.read(gadget, "functions/midi.midi/in_ports") == "2\n"
     assert FakeConfigfs.read(gadget, "UDC") == "udc.0"
 
     assert File.read_link!(Path.join(gadget, "configs/c.1/midi.midi")) ==
              Path.join(gadget, "functions/midi.midi")
 
-    assert %{kind: Midi, name: "midi", settings: %{ports: 2}, endpoints: {1, 1}} in Kuroneko.Gadget.instances(
-             pid
-           )
+    assert %{kind: Midi, name: "midi", settings: %{ports: 2}} in Kuroneko.Gadget.instances(pid)
 
     # The system's network, the keyboard, the MIDI function and the serial port.
     assert %{in: 6, out: 3} = Kuroneko.Gadget.endpoints_in_use(pid)
@@ -208,8 +199,8 @@ defmodule Kuroneko.Gadget.FunctionTest do
   } do
     assert {:error, {:invalid_ports, 20}} = Kuroneko.Gadget.configure(pid, [{Midi, ports: 20}])
 
-    assert {:error, {:unknown_options, Serial, [:speed]}} =
-             Kuroneko.Gadget.configure(pid, [{Serial, speed: 115_200}])
+    assert {:error, {:unknown_options, ACM, [:speed]}} =
+             Kuroneko.Gadget.configure(pid, [{ACM, speed: 115_200}])
 
     assert {:error, {:unknown_function, {FakeConfigfs, []}}} =
              Kuroneko.Gadget.configure(pid, [{FakeConfigfs, []}])
@@ -221,14 +212,14 @@ defmodule Kuroneko.Gadget.FunctionTest do
 
     assert {:error, {:not_enough_endpoints, %{need: %{in: 8, out: 4}}}} =
              Kuroneko.Gadget.configure(pid, [
-               Serial,
-               {Serial, name: "console"},
-               {Serial, name: "log"}
+               ACM,
+               {ACM, name: "console"},
+               {ACM, name: "log"}
              ])
 
     assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard])
 
-    assert {:error, {%{kind: Broken}, {Broken, %RuntimeError{message: "no such attribute"}}}} =
+    assert {:error, {Broken, %RuntimeError{message: "no such attribute"}}} =
              Kuroneko.Gadget.configure(pid, [:keyboard, Broken])
 
     assert Kuroneko.Gadget.functions(pid) == [:keyboard]
@@ -249,12 +240,12 @@ defmodule Kuroneko.Gadget.FunctionTest do
   end
 
   test "the serial port's device", %{gadget: gadget, pid: pid} do
-    assert :ok = Kuroneko.Gadget.configure(pid, [Serial, {Serial, name: "console"}])
+    assert :ok = Kuroneko.Gadget.configure(pid, [ACM, {ACM, name: "console"}])
     File.write!(Path.join(gadget, "functions/acm.serial/port_num"), "0\n")
     File.write!(Path.join(gadget, "functions/acm.console/port_num"), "1\n")
 
-    assert Serial.tty(gadget: gadget) == {:ok, "/dev/ttyGS0"}
-    assert Serial.tty(gadget: gadget, name: "console") == {:ok, "/dev/ttyGS1"}
-    assert Serial.tty(gadget: gadget, name: "other") == {:error, :enoent}
+    assert ACM.tty(gadget: gadget) == {:ok, "/dev/ttyGS0"}
+    assert ACM.tty(gadget: gadget, name: "console") == {:ok, "/dev/ttyGS1"}
+    assert {:error, {:configfs, _path, :enoent}} = ACM.tty(gadget: gadget, name: "other")
   end
 end

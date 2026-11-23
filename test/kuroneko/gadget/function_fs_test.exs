@@ -136,8 +136,8 @@ defmodule Kuroneko.Gadget.FunctionFSTest do
     assert Loopback.type() == "ffs"
     assert Loopback.default_name() == "loopback"
     assert Loopback.settings([]) == {:ok, %{}}
-    assert Loopback.endpoints(%{}) == {1, 1}
-    assert Loopback.endpoints(%{ins: 3}) == {3, 1}
+    assert Loopback.endpoints(%{}) == %{in: 1, out: 1}
+    assert Loopback.endpoints(%{ins: 3}) == %{in: 3, out: 1}
 
     assert {:error, {_endpoint, {:invalid_max_packet, 100}}} = Loopback.settings(packet: 100)
     assert Kuroneko.Gadget.endpoints([:keyboard, {Loopback, ins: 2}]) == {:ok, %{in: 3, out: 1}}

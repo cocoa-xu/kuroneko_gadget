@@ -1,22 +1,27 @@
 # Kuroneko.Gadget
 
-The USB side of a KVM, for Elixir on Linux: what the target computer sees
-when the KVM is plugged into it.
+The USB side of a KVM, for Elixir on Linux: the devices the target computer
+sees when the KVM is plugged into it, as the functions of a USB gadget in
+configfs.
 
-* **Keyboard and mouse** - a boot keyboard, an absolute pointer (a mouse, a
-  pen or a ten-finger touch screen) and a relative boot mouse, waking the
-  target from sleep
-* **Mass storage** - disk and CD-ROM images
-* **Two-way USB audio** - a microphone and a speaker for the target, each
-  mono to 7.1, 16 to 32 bits, at the rates the target chooses from
-* **USB network** - the MAC addresses of the network function, to read and
-  to change
-* **The connection** - whether the target has set the device up, and at what
-  speed
+Linux sorts gadget functions by driver, and so does this library, with a
+module for each:
 
-It adds and removes the functions of a USB gadget in configfs, with the
-kernel's own function drivers (HID, mass storage, UAC2): pure Elixir, no
-programs or NIFs.
+* `Kuroneko.Gadget.HID` - keyboards, mice and any HID device, by its report
+  descriptor. `Kuroneko.Gadget.Input` types and points with the KVM's
+  keyboard and mice (an absolute pointer, a pen or a ten-finger touch
+  screen, and a relative boot mouse), and wakes a target that sleeps.
+* `Kuroneko.Gadget.MassStorage` - drives that hold image files, as removable
+  disks or as CDs, DVDs and BDs, audio and mixed-mode CDs too
+* `Kuroneko.Gadget.UAC2` - a sound card, a microphone and a speaker for the
+  target, mono to 7.1, 16 to 32 bits, at the rates the target chooses from
+* `Kuroneko.Gadget.NCM` - a network adapter, whose addresses stay the same
+  across boots
+* `Kuroneko.Gadget.ACM` - a serial port
+* `Kuroneko.Gadget.FunctionFS` - a function written in Elixir
+
+`Kuroneko.Gadget` puts them on the gadget within the endpoints the device
+controller has, and changes them while the KVM runs.
 
 It is part of [Kuroneko](https://github.com/cocoa-xu/kuroneko), an open KVM.
 Board libraries give it their board's settings, such as
@@ -35,35 +40,29 @@ end
 
 The system sets up the gadget at boot and binds it to the device controller,
 as the NanoKVM-Go's Nerves system does. Its kernel needs configfs gadgets
-with the functions you use: `CONFIG_USB_CONFIGFS_F_HID`,
-`CONFIG_USB_CONFIGFS_MASS_STORAGE`, `CONFIG_USB_CONFIGFS_F_UAC2`.
-DVDs and BDs, CDs of tracks (audio and mixed-mode CDs from CUE sheets) and
-asking the target to eject a disc need the mass storage function's
-`profile`, `tracks` and `eject_request` attributes, which Kuroneko's kernel
-(`cocoa-xu/linux-ax620e`) adds; without them its optical drive holds CDs of
-one data track.
+with the functions you use, such as `CONFIG_USB_CONFIGFS_F_HID`. DVDs and
+BDs, CDs of tracks and asking the target to eject a disc need the mass
+storage function's `profile`, `tracks` and `eject_request` attributes,
+which Kuroneko's kernel (`cocoa-xu/linux-ax620e`) adds.
+
+FunctionFS functions run a small C program, `kuroneko_ffs`, which the
+library builds with `elixir_make` on Linux, Nerves cross-compiling it; on
+other hosts nothing is built.
 
 ## Usage
 
 ```elixir
 children = [
   {Kuroneko.Gadget, functions: [:keyboard, :mouse, :relative_mouse, :storage]},
-  Kuroneko.Gadget.HID
+  Kuroneko.Gadget.Input
 ]
 
 Supervisor.start_link(children, strategy: :one_for_one)
 ```
 
-The functions go on the only gadget in configfs, or the one in the
-application environment:
-
-```elixir
-config :kuroneko_gadget, gadget: "/sys/kernel/config/usb_gadget/g1"
-```
-
-On a board, start the gadget with the board's settings: the largest packets
-its USB controller takes, the names the target sees, and how it keeps the
-network's addresses.
+On a board, start the gadget with the board's settings: the endpoints and
+largest packets its USB controller takes, the names the target sees, and
+how it keeps the network's addresses.
 
 ```elixir
 {Kuroneko.Gadget, NanoKVMGo.USB.gadget_options() ++ [functions: [:keyboard, :mouse]]}
@@ -72,38 +71,32 @@ network's addresses.
 ### Keyboard and mouse
 
 ```elixir
-Kuroneko.Gadget.HID.key("KeyA", :down)
-Kuroneko.Gadget.HID.key("KeyA", :up)
-Kuroneko.Gadget.HID.type("Hello!\n")
-Kuroneko.Gadget.HID.pointer(x: 0.5, y: 0.5, buttons: [:left])
-Kuroneko.Gadget.HID.relative(dx: 10, dy: -5, wheel: 1)
-Kuroneko.Gadget.HID.release_all()
+Kuroneko.Gadget.Input.key("KeyA", :down)
+Kuroneko.Gadget.Input.key("KeyA", :up)
+Kuroneko.Gadget.Input.type("Hello!\n")
+Kuroneko.Gadget.Input.pointer(x: 0.5, y: 0.5, buttons: [:left])
+Kuroneko.Gadget.Input.relative(dx: 10, dy: -5, wheel: 1)
+Kuroneko.Gadget.Input.release_all()
 ```
 
 Keys are named like the browser's `KeyboardEvent.code`, so web clients can
 pass them through. `{:mouse, mode: :stylus}` or `{:mouse, mode: :touch}`
-turns the absolute pointer into a pen or a touch screen, for Android and
-iPadOS targets; `Kuroneko.Gadget.HID.touch/2` sends up to ten touches. The
-relative mouse is a boot mouse, for BIOS setups and games. Input wakes a
-target that sleeps.
+makes the absolute pointer a pen or a touch screen, for Android and iPadOS
+targets.
 
 ### Mass storage
 
 ```elixir
-Kuroneko.Gadget.Storage.insert("/data/images/debian.iso")
-Kuroneko.Gadget.Storage.medium()
-#=> {:ok, %{image: "/data/images/debian.iso", cdrom: true, read_only: true}}
-Kuroneko.Gadget.Storage.eject()
+Kuroneko.Gadget.MassStorage.insert("/data/images/debian.iso")
+Kuroneko.Gadget.MassStorage.medium()
+#=> {:ok, %{image: "/data/images/debian.iso", as: :dvd, read_only: true, tracks: nil}}
+Kuroneko.Gadget.MassStorage.eject()
 ```
 
-ISO images become CD-ROMs by default, other images drives.
+An image of ISO 9660 or UDF goes in as a DVD by default, any other as a
+removable disk.
 
-### USB microphone and speaker
-
-With the `:microphone` and `:speaker` functions the target computer sees a
-USB sound card, stereo, 16-bit and 48 kHz by default. Each direction takes
-its channels, the rates the target can choose from (starting with the
-first) and its sample size:
+### Microphone and speaker
 
 ```elixir
 {Kuroneko.Gadget,
@@ -116,13 +109,8 @@ first) and its sample size:
 The sound itself goes through ALSA, the card `UAC2Gadget`: on the
 NanoKVM-Go, `NanoKVMGo.Microphone` plays to the target's microphone and
 `NanoKVMGo.Audio` with `source: :usb` records its speaker.
-`Kuroneko.Gadget.validate/2` tells whether the device controller can carry
-a format.
 
 ### The USB network
-
-The target computer reaches the device over USB too, through a network
-adapter it sees: the network function the system set up.
 
 ```elixir
 Kuroneko.Gadget.network()
@@ -131,23 +119,28 @@ Kuroneko.Gadget.network()
 :ok = Kuroneko.Gadget.set_network_addresses(host_address: "02:12:34:56:78:9a")
 ```
 
-The `:network` option's `:persist` function keeps new addresses for the next
-boots, where the system reads them.
+### Functions of your own
 
-### The connection
+Any HID device, by its report descriptor, or any other function module:
 
 ```elixir
-Kuroneko.Gadget.connection()
-#=> {:ok, %{state: :configured, speed: :high_speed, controller: "8000000.usb"}}
+Kuroneko.Gadget.configure([
+  :keyboard,
+  {Kuroneko.Gadget.HID, name: "pad", descriptor: %{report_desc: pad, report_length: 4}},
+  Kuroneko.Gadget.ACM
+])
 ```
+
+`Kuroneko.Gadget.FunctionFS` writes a whole USB function in Elixir, its
+descriptors as data and its transfers as events, and
+`Kuroneko.Gadget.Function` adds another of the kernel's functions.
 
 ## Changing USB functions
 
-Adding or removing functions, or changing the network's addresses,
-disconnects the device from the target computer for a moment, and with the
-keyboard and mice the target computer takes input from it. Each function
-takes endpoints of the device controller, which has few: a change it
-refuses leaves the functions as they were.
+Adding or removing functions, or changing the network's addresses, takes
+the device off the bus for a moment, and the keyboard and mice with it. Each
+function takes endpoints of the device controller, which has few: a change
+it refuses leaves the functions as they were.
 
 ## License
 

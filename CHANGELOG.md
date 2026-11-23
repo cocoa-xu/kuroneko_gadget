@@ -2,13 +2,37 @@
 
 ## Unreleased
 
-* Functions of your own: a module of `Kuroneko.Gadget.Function` goes in
-  the functions as the built-in kinds do, `MyFunction` or `{MyFunction,
-  name: "x", ...}`, with its endpoints counted, its instances told apart on
-  the gadget, made again when their settings change, and readied before
-  the gadget connects
-* A serial port to the target computer, `Kuroneko.Gadget.Serial` (USB CDC
-  ACM), the first of them
+The functions follow Linux's USB gadget function drivers, a module for each,
+which the built-in kinds are instances of. Breaking changes:
+
+* `Kuroneko.Gadget.Function`, a behaviour for a kernel function driver:
+  `Kuroneko.Gadget.HID` (any HID device by its report descriptor, the
+  keyboard and mice among them), `Kuroneko.Gadget.MassStorage`,
+  `Kuroneko.Gadget.NCM`, `Kuroneko.Gadget.UAC2`, `Kuroneko.Gadget.ACM` (a
+  serial port, new) and `Kuroneko.Gadget.FunctionFS` (new: functions written
+  in Elixir, with the `kuroneko_ffs` program). Their instances go in the
+  functions as `{Module, name: "x", ...}`; `:keyboard`, `:storage` and the
+  other kinds stay as shorthands, and `{:audio, microphone: ..., speaker:
+  ...}` is one too
+* `Kuroneko.Gadget.HID`'s keyboard and pointer input is
+  `Kuroneko.Gadget.Input`; `type/2` returns at once and types in the
+  process, and `release_all/1` stops it
+* `Kuroneko.Gadget.Storage` is `Kuroneko.Gadget.MassStorage`: `:name` names
+  the function (was `:storage`), `:as` says how a drive holds its image,
+  `:disk`, `:cd`, `:dvd` or `:bd` (was `:cdrom` and `:disc`), also in
+  `medium/1`, `luns/1` is `lun_count/1`, and an image of ISO 9660 or UDF is a
+  disc by its content, not its name
+* A storage function keeps its drives' media when its LUNs change, in place
+* `replug/1` is a call to the `Kuroneko.Gadget` process, which keeps the
+  gadget off the bus for its `:replug_ms`
+* Errors of configfs are `{:configfs, path, reason}`; a function's error is
+  no longer wrapped with the function
+* Options are checked: unknown ones and wrong values raise in the caller
+  (`start_link/1`, `MassStorage.insert/2`, `Input.pointer/2`...)
+* `audio/1`, `hid_device/2`, `only_gadget/1` and the `:gadget` application
+  environment are gone: `instances/1`, `HID.device/1` and
+  `default_gadget/1` tell the same
+* `endpoints/1` and the functions' endpoints are `%{in: n, out: n}`
 
 ## v0.3.0 (2026-11-23)
 

@@ -1,6 +1,6 @@
-defmodule Kuroneko.Gadget.HID.Writer do
+defmodule Kuroneko.Gadget.Input.Writer do
   @moduledoc false
-  # Writes reports to one /dev/hidg* device, linked to Kuroneko.Gadget.HID.
+  # Writes reports to one /dev/hidg* device, linked to Kuroneko.Gadget.Input.
   #
   # A write blocks until the target computer has taken the previous report,
   # and for as long as it does not poll (unplugged, asleep), so writes happen
@@ -43,7 +43,7 @@ defmodule Kuroneko.Gadget.HID.Writer do
             loop(path, device)
 
           {:error, reason} ->
-            # The gadget went away (rebind, unplug): Kuroneko.Gadget.HID opens
+            # The gadget went away (rebind, unplug): Kuroneko.Gadget.Input opens
             # it again.
             Logger.info("kuroneko_gadget: #{path}: #{inspect(reason)}")
             exit({:shutdown, reason})
