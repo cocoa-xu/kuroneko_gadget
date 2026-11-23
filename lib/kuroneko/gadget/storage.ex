@@ -241,7 +241,8 @@ defmodule Kuroneko.Gadget.Storage do
         {:ok, :none}
 
       {:ok, _image} ->
-        case write(lun, "file", "") do
+        # A newline: writing nothing does not reach the kernel
+        case write(lun, "file", "\n") do
           :ok -> {:ok, :ejected}
           {:error, :ebusy} -> ask_or_force(lun, wait, opts)
           {:error, reason} -> {:error, reason}
@@ -347,9 +348,15 @@ defmodule Kuroneko.Gadget.Storage do
 
   defp write_tracks(lun, table) do
     cond do
-      File.exists?(Path.join(lun, "tracks")) -> write(lun, "tracks", table)
-      table == "" -> :ok
-      true -> {:error, :tracks_unsupported}
+      # A newline clears the table: writing nothing does not reach the kernel
+      File.exists?(Path.join(lun, "tracks")) ->
+        write(lun, "tracks", if(table == "", do: "\n", else: table))
+
+      table == "" ->
+        :ok
+
+      true ->
+        {:error, :tracks_unsupported}
     end
   end
 
