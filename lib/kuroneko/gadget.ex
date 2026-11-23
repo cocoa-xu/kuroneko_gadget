@@ -121,7 +121,6 @@ defmodule Kuroneko.Gadget do
   require Logger
   import Bitwise
 
-  alias Kuroneko.Gadget.Function, as: ModuleFunction
   alias Kuroneko.Gadget.HID.Descriptor
 
   @config "configs/c.1"
@@ -606,13 +605,12 @@ defmodule Kuroneko.Gadget do
       # directory does not).
       udc_class: Keyword.get(opts, :udc_class, @udc_class),
       rmdir: Keyword.get(opts, :rmdir, &File.rmdir/1),
-      # The functions of modules set up, by their directories.
-      modules: %{}
+      module_functions: %{}
     }
 
     case apply_functions(state, functions) do
-      {:ok, modules} ->
-        {:ok, %{state | modules: modules}}
+      {:ok, module_functions} ->
+        {:ok, %{state | module_functions: module_functions}}
 
       {:error, reason} ->
         Logger.error(
@@ -626,9 +624,13 @@ defmodule Kuroneko.Gadget do
   @impl GenServer
   def handle_call({:configure, functions}, _from, state) do
     case apply_functions(state, functions) do
-      {:ok, modules} ->
+      {:ok, module_functions} ->
         {:reply, :ok,
-         %{state | network_managed: managing_networks?(state, functions), modules: modules}}
+         %{
+           state
+           | network_managed: managing_networks?(state, functions),
+             module_functions: module_functions
+         }}
 
       error ->
         {:reply, error, state}
@@ -844,7 +846,7 @@ defmodule Kuroneko.Gadget do
 
     rank = fn {name, function} ->
       kind =
-        case instance_of(function, state.modules) do
+        case instance_of(function, state.module_functions) do
           [%{kind: kind}] -> kind
           [] -> nil
         end
@@ -931,12 +933,11 @@ defmodule Kuroneko.Gadget do
              do: ready_again(state, wanted),
              else: change(state, present, wanted)
            ) do
-      {:ok, modules(wanted)}
+      {:ok, module_functions(wanted)}
     end
   end
 
-  # Modules' functions readied again, such as one whose process went: when
-  # that takes the gadget off the bus, it connects again.
+  # Readying a FunctionFS function anew takes the gadget off the bus.
   defp ready_again(state, wanted) do
     udc = bound_udc(state.gadget)
 
@@ -1011,10 +1012,9 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  # The functions in the configuration that this module knows, in order. A
-  # module's are those set up, else those asked for.
+  # A module's function is as this process set it up, else as asked for.
   defp present(state, wanted \\ []) do
-    known = Map.merge(modules(wanted), state.modules)
+    known = Map.merge(module_functions(wanted), state.module_functions)
     config = Path.join(state.gadget, @config)
 
     case File.ls(config) do
@@ -1029,7 +1029,7 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  defp modules(instances) do
+  defp module_functions(instances) do
     for %{kind: kind} = instance <- instances,
         is_module_kind(kind),
         into: %{},
@@ -1040,25 +1040,10 @@ defmodule Kuroneko.Gadget do
 
   defp rank(kind), do: Enum.find_index(@order, &(&1 == kind)) || length(@order)
 
-  defp instance_of(dir, modules) do
-    case Map.fetch(modules, Path.basename(dir)) do
-      {:ok, instance} -> [read_module(dir, instance)]
+  defp instance_of(dir, module_functions) do
+    case Map.fetch(module_functions, Path.basename(dir)) do
+      {:ok, instance} -> [instance]
       :error -> builtin_instance(dir)
-    end
-  end
-
-  # A module's function as the module reads it; one it does not take for
-  # what was set up is made again.
-  defp read_module(dir, %{kind: module} = instance) do
-    if function_exported?(module, :read, 1) do
-      with {:ok, settings} <- callback(module, :read, [dir]),
-           {:ok, endpoints} <- module_endpoints(module, settings) do
-        %{instance | settings: settings, endpoints: endpoints}
-      else
-        _other -> Map.put(instance, :changed, true)
-      end
-    else
-      instance
     end
   end
 
@@ -1205,10 +1190,9 @@ defmodule Kuroneko.Gadget do
     end
   end
 
-  # A module's function that fails to set up goes, as it would be removed.
   defp setup(dir, %{kind: module, settings: settings} = instance, state)
        when is_module_kind(module) do
-    with {:error, reason} <- run(module, :setup, [dir, settings]) do
+    with {:error, reason} <- run_callback(module, :setup, [dir, settings]) do
       _ = teardown(dir, instance)
       _ = state.rmdir.(dir)
       {:error, reason}
@@ -1323,7 +1307,7 @@ defmodule Kuroneko.Gadget do
   defp ready(state, %{kind: module, settings: settings} = instance)
        when is_module_kind(module) do
     if function_exported?(module, :ready, 2),
-      do: run(module, :ready, [dir(state.gadget, instance), settings]),
+      do: run_callback(module, :ready, [dir(state.gadget, instance), settings]),
       else: :ok
   end
 
@@ -1331,7 +1315,7 @@ defmodule Kuroneko.Gadget do
 
   defp teardown(dir, %{kind: module, settings: settings}) when is_module_kind(module) do
     if function_exported?(module, :teardown, 2),
-      do: run(module, :teardown, [dir, settings]),
+      do: run_callback(module, :teardown, [dir, settings]),
       else: :ok
   end
 
@@ -1400,73 +1384,49 @@ defmodule Kuroneko.Gadget do
       else: {:error, {:invalid_name, kind, name}}
   end
 
-  defp entry(module, _max_packet) when is_module_kind(module),
-    do: module_entry(module, module, [])
+  defp entry(module, _max_packet) when is_module_kind(module) do
+    if function_module?(module),
+      do: module_entry(module, []),
+      else: {:error, {:unknown_function, module}}
+  end
 
-  defp entry({module, opts} = spec, _max_packet) when is_module_kind(module) and is_list(opts),
-    do: module_entry(spec, module, opts)
+  defp entry({module, opts} = spec, _max_packet) when is_module_kind(module) and is_list(opts) do
+    if function_module?(module),
+      do: module_entry(module, opts),
+      else: {:error, {:unknown_function, spec}}
+  end
 
   defp entry(other, _max_packet), do: {:error, {:unknown_function, other}}
 
-  defp module_entry(spec, module, opts) do
-    with true <- ModuleFunction.function?(module) || {:error, {:unknown_function, spec}},
-         true <- Keyword.keyword?(opts) || {:error, {:invalid_options, module, opts}},
-         :ok <- module_type(module),
-         {name, opts} =
-           Keyword.pop_lazy(opts, :name, fn -> callback(module, :default_name, []) end),
-         true <- valid_name?(name) || {:error, {:invalid_name, module, name}},
-         {:ok, settings} <- module_settings(module, opts),
-         {:ok, endpoints} <- module_endpoints(module, settings) do
-      {:ok, %{kind: module, name: name, settings: settings, endpoints: endpoints}}
+  defp function_module?(module) do
+    Code.ensure_loaded?(module) and
+      Kuroneko.Gadget.Function in List.flatten(
+        Keyword.get_values(module.module_info(:attributes), :behaviour)
+      )
+  end
+
+  defp module_entry(module, opts) do
+    {name, opts} = Keyword.pop_lazy(opts, :name, &module.default_name/0)
+
+    if valid_name?(name) do
+      with {:ok, settings} <- module.settings(opts) do
+        {:ok,
+         %{kind: module, name: name, settings: settings, endpoints: module.endpoints(settings)}}
+      end
+    else
+      {:error, {:invalid_name, module, name}}
     end
   end
 
-  # configfs function types are letters, digits and "_".
-  defp module_type(module) do
-    case callback(module, :type, []) do
-      type when is_binary(type) ->
-        if String.match?(type, ~r/^[A-Za-z0-9_]+$/),
-          do: :ok,
-          else: {:error, {:invalid_type, module, type}}
-
-      other ->
-        {:error, {:invalid_type, module, other}}
-    end
-  end
-
-  defp module_settings(module, opts) do
-    case callback(module, :settings, [opts]) do
-      {:ok, settings} -> {:ok, settings}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {module, :settings, {:bad_return, other}}}
-    end
-  end
-
-  defp module_endpoints(module, settings) do
-    case callback(module, :endpoints, [settings]) do
-      {ins, outs} when is_integer(ins) and ins >= 0 and is_integer(outs) and outs >= 0 ->
-        {:ok, {ins, outs}}
-
-      other ->
-        {:error, {module, :endpoints, {:bad_return, other}}}
-    end
-  end
-
-  defp run(module, name, args) do
-    case callback(module, name, args) do
+  # These change the system: an exception fails the change, which goes back,
+  # instead of the process.
+  defp run_callback(module, callback, args) do
+    case apply(module, callback, args) do
       :ok -> :ok
       {:error, reason} -> {:error, reason}
-      other -> {:error, {module, name, {:bad_return, other}}}
     end
-  end
-
-  # A module's callback, its exceptions and exits as errors.
-  defp callback(module, name, args) do
-    apply(module, name, args)
   rescue
-    exception -> {:error, {module, name, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {module, name, {kind, reason}}}
+    exception -> {:error, {module, exception}}
   end
 
   defp kind_entry(:mouse, name, opts, _max_packet) do

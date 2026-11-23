@@ -35,22 +35,11 @@ defmodule Kuroneko.Gadget.FunctionTest do
     end
 
     @impl true
-    def read(dir) do
-      with {:ok, text} <- File.read(Path.join(dir, "in_ports")),
-           {ports, _rest} <- Integer.parse(text) do
-        {:ok, %{ports: ports}}
-      else
-        _ -> :error
-      end
-    end
-
-    @impl true
     def ready(dir, _settings), do: log(dir, "ready")
 
     @impl true
     def teardown(dir, _settings), do: log(dir, "teardown")
 
-    # The calls, in a file beside the gadget's functions.
     defp log(dir, call),
       do: File.write(Path.join(dir, "../../calls"), "#{call} #{Path.basename(dir)}\n", [:append])
   end
@@ -192,28 +181,23 @@ defmodule Kuroneko.Gadget.FunctionTest do
     assert Kuroneko.Gadget.functions(pid) == []
   end
 
-  test "tells a module's functions by what the module reads, else as they were asked for", %{
+  test "a module's function is as it was set up, else as it is asked for", %{
     gadget: gadget,
     options: options,
     pid: pid
   } do
     assert :ok = Kuroneko.Gadget.configure(pid, [Printer, {Midi, name: "keys"}])
-
     File.write!(Path.join(gadget, "functions/printer.printer/pnp_string"), "changed")
-    File.write!(Path.join(gadget, "functions/midi.keys/in_ports"), "3\n")
 
-    assert %{settings: %{ports: 3}} =
-             Enum.find(Kuroneko.Gadget.instances(pid), &(&1.kind == Midi))
-
-    assert :ok = Kuroneko.Gadget.configure(pid, [Printer, {Midi, name: "keys"}])
+    assert :ok = Kuroneko.Gadget.configure(pid, [Printer, {Midi, name: "keys", ports: 3}])
     assert FakeConfigfs.read(gadget, "functions/printer.printer/pnp_string") == "changed"
-    assert FakeConfigfs.read(gadget, "functions/midi.keys/in_ports") == "1\n"
+    assert FakeConfigfs.read(gadget, "functions/midi.keys/in_ports") == "3\n"
 
-    # A new process takes those there for those asked for: readied, not made again.
+    # A new process finds them as asked for: readied, not made again.
     stop_supervised!(Kuroneko.Gadget)
     calls = calls(gadget)
-
-    start_supervised!({Kuroneko.Gadget, [functions: [Printer, {Midi, name: "keys"}]] ++ options})
+    functions = [Printer, {Midi, name: "keys", ports: 3}]
+    start_supervised!({Kuroneko.Gadget, [functions: functions] ++ options})
 
     assert calls(gadget) == calls ++ ["ready midi.keys"]
   end
@@ -244,7 +228,7 @@ defmodule Kuroneko.Gadget.FunctionTest do
 
     assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard])
 
-    assert {:error, {%{kind: Broken}, {Broken, :setup, "no such attribute"}}} =
+    assert {:error, {%{kind: Broken}, {Broken, %RuntimeError{message: "no such attribute"}}}} =
              Kuroneko.Gadget.configure(pid, [:keyboard, Broken])
 
     assert Kuroneko.Gadget.functions(pid) == [:keyboard]

@@ -1,26 +1,22 @@
 defmodule Kuroneko.Gadget.Serial do
   @moduledoc """
-  A serial port between the device and the target computer (USB CDC ACM),
-  a function for `Kuroneko.Gadget`:
+  A serial port between the device and the target computer, over USB CDC
+  ACM.
 
       Kuroneko.Gadget.configure([:keyboard, :mouse, Kuroneko.Gadget.Serial])
       Kuroneko.Gadget.Serial.tty()
       #=> {:ok, "/dev/ttyGS0"}
 
-  The target sees a modem: Linux as `/dev/ttyACM0`, macOS as
-  `/dev/cu.usbmodem...`, Windows as a COM port, which a console, a
-  terminal program or a script on the target can use. The device's end is
-  `tty/1`. The speed and the line settings are the target's to choose; the
-  data goes as fast as USB takes it either way.
+  The target sees a modem: `/dev/ttyACM0` on Linux, `/dev/cu.usbmodem...` on
+  macOS, a COM port on Windows. Each port takes two IN endpoints and one
+  OUT; more than one need names, such as `{Kuroneko.Gadget.Serial, name:
+  "console"}`.
 
-  Each port takes two IN endpoints and one OUT. Several have their names:
-  `{Kuroneko.Gadget.Serial, name: "console"}`.
-
-  The device's end is a terminal in line mode at first, as Linux makes
-  them. Read it with a port program, such as `Circuits.UART`: a blocking
-  `File` read holds one of the VM's dirty I/O schedulers until data comes,
-  and nothing calls it off.
+  Read the device's end with a port program such as `Circuits.UART`: a
+  `File` read blocks one of the VM's dirty I/O schedulers until data comes,
+  and nothing can call it off.
   """
+
   @behaviour Kuroneko.Gadget.Function
 
   @impl Kuroneko.Gadget.Function
@@ -34,28 +30,20 @@ defmodule Kuroneko.Gadget.Serial do
   def settings(opts), do: {:error, {:unknown_options, __MODULE__, Keyword.keys(opts)}}
 
   @impl Kuroneko.Gadget.Function
-  def endpoints(_settings), do: {2, 1}
+  def endpoints(%{}), do: {2, 1}
 
   @impl Kuroneko.Gadget.Function
-  def setup(_dir, _settings), do: :ok
-
-  @impl Kuroneko.Gadget.Function
-  def read(_dir), do: {:ok, %{}}
+  def setup(_dir, %{}), do: :ok
 
   @doc """
   The device's end of the port, such as `"/dev/ttyGS0"`: the default
   port's, or that of the one `:name` names. Takes the `:gadget` option.
   """
-  @spec tty(keyword()) :: {:ok, Path.t()} | {:error, term()}
+  @spec tty(keyword()) :: {:ok, Path.t()} | {:error, File.posix()}
   def tty(opts \\ []) do
-    port = Path.join(Kuroneko.Gadget.function_dir(__MODULE__, opts), "port_num")
+    port_num = Path.join(Kuroneko.Gadget.function_dir(__MODULE__, opts), "port_num")
 
-    with {:ok, text} <- File.read(port),
-         {number, _rest} <- Integer.parse(String.trim(text)) do
-      {:ok, "/dev/ttyGS#{number}"}
-    else
-      {:error, reason} -> {:error, reason}
-      :error -> {:error, :no_port}
-    end
+    with {:ok, number} <- File.read(port_num),
+         do: {:ok, "/dev/ttyGS" <> String.trim(number)}
   end
 end

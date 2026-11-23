@@ -119,8 +119,6 @@ static int read_full(int fd, void *data, size_t size)
     return 0;
 }
 
-// One packet to the VM: the kind, a byte, then the data. The VM gone, the
-// program has nothing left to do.
 static void send_packet(char kind, int byte, const void *data, size_t size)
 {
     unsigned char header[6];
@@ -240,8 +238,6 @@ static struct request *next_request(struct endpoint *ep)
     return request;
 }
 
-// An IN endpoint writes what it is given, an empty write being a packet of
-// zero length; an OUT endpoint reads as much as it is asked for.
 static void *endpoint_loop(void *arg)
 {
     struct endpoint *ep = arg;

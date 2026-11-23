@@ -1,19 +1,17 @@
 defmodule Kuroneko.Gadget.FunctionFS.Server do
   @moduledoc false
-  # The process of a FunctionFS function: it mounts the function's
-  # FunctionFS, runs kuroneko_ffs on it (see c_src/kuroneko_ffs.c for the
-  # packets), and calls the module's callbacks.
+
   use GenServer, restart: :temporary
 
   require Logger
 
-  alias Kuroneko.Gadget.FunctionFS
+  alias Kuroneko.Gadget.FunctionFS.EP0
 
-  @reply_ms 5_000
-  @quit_ms 2_000
+  @registry Kuroneko.Gadget.FunctionFS.Registry
+  @supervisor Kuroneko.Gadget.FunctionFS.Supervisor
+  @reply_timeout 5_000
+  @quit_timeout 2_000
   @max_transfer 1_048_576
-
-  # The kernel's error numbers, the same on every Linux architecture.
   @errnos %{
     1 => :eperm,
     2 => :enoent,
@@ -33,111 +31,50 @@ defmodule Kuroneko.Gadget.FunctionFS.Server do
     125 => :ecanceled
   }
 
-  @spec start_link({module(), Path.t(), term()}) :: GenServer.on_start()
-  def start_link({_module, dir, _settings} = args) do
-    GenServer.start_link(__MODULE__, args,
-      name: {:via, Registry, {Kuroneko.Gadget.FunctionFS.Registry, dir}}
-    )
+  @spec ready(module(), Path.t(), term()) :: :ok | {:error, term()}
+  def ready(module, dir, settings) do
+    case DynamicSupervisor.start_child(@supervisor, {__MODULE__, {module, dir, settings}}) do
+      {:ok, _pid} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
   end
+
+  @spec teardown(Path.t()) :: :ok | {:error, term()}
+  def teardown(dir) do
+    Enum.each(Registry.lookup(@registry, dir), fn {pid, _value} ->
+      DynamicSupervisor.terminate_child(@supervisor, pid)
+    end)
+
+    unmount(dir)
+  end
+
+  @spec start_link({module(), Path.t(), term()}) :: GenServer.on_start()
+  def start_link({_module, dir, _settings} = args),
+    do: GenServer.start_link(__MODULE__, args, name: {:via, Registry, {@registry, dir}})
 
   @impl GenServer
   def init({module, dir, settings}) do
-    # The program is told to quit when the function goes.
+    # Without trapping exits, terminate/2 does not run when the supervisor
+    # stops the process, and the program would outlive the unmount.
     Process.flag(:trap_exit, true)
 
-    with {:ok, layout} <- layout(module, settings),
-         {:ok, program} <- FunctionFS.program(),
-         :ok <- FunctionFS.mount(dir),
-         {:ok, port} <- open(program, FunctionFS.mount_dir(dir)) do
-      state = %{
-        module: module,
-        port: port,
-        endpoints: Map.new(layout.endpoints, &{&1.number, &1.direction}),
-        user: nil
-      }
-
-      start(state, layout, settings)
+    with {:ok, ep0} <- EP0.encode(module.interfaces(settings)),
+         {:ok, program} <- program(),
+         :ok <- mount(dir),
+         port = open(program, mount_point(dir)),
+         :ok <- start(port, ep0),
+         {:ok, user} <- module.init(settings) do
+      directions = ep0.directions |> Enum.with_index(1) |> Map.new(fn {d, n} -> {n, d} end)
+      {:ok, %{module: module, port: port, directions: directions, user: user}}
     else
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp start(state, layout, settings) do
-    directions =
-      for e <- layout.endpoints, into: <<>>, do: <<if(e.direction == :in, do: 1, else: 0)>>
-
-    with :ok <- command(state.port, ?D, layout.descriptors),
-         :ok <- command(state.port, ?S, layout.strings),
-         :ok <- command(state.port, ?O, <<length(layout.endpoints), directions::binary>>),
-         {:ok, user} <- init_callback(state.module, settings) do
-      {:ok, %{state | user: user}}
-    else
-      {:error, reason} ->
-        quit(state.port)
-        {:stop, reason}
-    end
-  end
-
-  defp layout(module, settings) do
-    FunctionFS.layout(module.interfaces(settings))
-  rescue
-    exception -> {:error, {module, :interfaces, Exception.message(exception)}}
-  end
-
-  defp init_callback(module, settings) do
-    if function_exported?(module, :init, 1) do
-      case callback(module, :init, [settings]) do
-        {:ok, user} -> {:ok, user}
-        {:error, reason} -> {:error, reason}
-        {:failed, reason} -> {:error, reason}
-        other -> {:error, {module, :init, {:bad_return, other}}}
-      end
-    else
-      {:ok, settings}
-    end
-  end
-
-  defp open(program, dir) do
-    {:ok,
-     Port.open({:spawn_executable, program}, [
-       :binary,
-       :exit_status,
-       :use_stdio,
-       {:packet, 4},
-       args: [dir]
-     ])}
-  rescue
-    exception -> {:error, {:port, Exception.message(exception)}}
-  end
-
-  # A command of the start, and the program's answer to it.
-  defp command(port, kind, data) do
-    Port.command(port, [kind, data])
-
-    receive do
-      {^port, {:data, <<?r, ^kind, status::signed-32>>}} when status >= 0 ->
-        :ok
-
-      {^port, {:data, <<?r, ^kind, status::signed-32>>}} ->
-        {:error, {kind_name(kind), errno(-status)}}
-
-      {^port, {:data, <<?r, ?E, status::signed-32>>}} ->
-        {:error, {:ep0, errno(-status)}}
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:exit_status, status}}
-    after
-      @reply_ms -> {:error, {kind_name(kind), :timeout}}
-    end
-  end
-
-  defp kind_name(?D), do: :descriptors
-  defp kind_name(?S), do: :strings
-  defp kind_name(?O), do: :endpoints
-
   @impl GenServer
   def handle_cast({:write, endpoint, data}, state) do
-    if state.endpoints[endpoint] == :in and is_binary(data) and byte_size(data) <= @max_transfer do
+    if state.directions[endpoint] == :in and byte_size(data) <= @max_transfer do
       Port.command(state.port, [?W, endpoint, data])
       {:noreply, state}
     else
@@ -146,7 +83,7 @@ defmodule Kuroneko.Gadget.FunctionFS.Server do
   end
 
   def handle_cast({:read, endpoint, size}, state) do
-    if state.endpoints[endpoint] == :out and is_integer(size) and size in 0..@max_transfer do
+    if state.directions[endpoint] == :out and size <= @max_transfer do
       Port.command(state.port, [?R, endpoint, <<size::32>>])
       {:noreply, state}
     else
@@ -154,107 +91,161 @@ defmodule Kuroneko.Gadget.FunctionFS.Server do
     end
   end
 
-  def handle_cast({:answer, data}, state) when is_binary(data) do
+  def handle_cast({:answer, data}, state) do
     Port.command(state.port, [?C, data])
     {:noreply, state}
   end
 
-  def handle_cast({:answer, _data}, state),
-    do: {:noreply, dispatch({:control_error, :einval}, state)}
-
   def handle_cast(:stall, state) do
-    Port.command(state.port, [?X])
+    Port.command(state.port, "X")
     {:noreply, state}
   end
 
   @impl GenServer
-  def handle_info({port, {:data, packet}}, %{port: port} = state) do
-    case decode(packet) do
-      {:stop, reason} -> {:stop, reason, state}
-      events -> {:noreply, Enum.reduce(events, state, &dispatch/2)}
-    end
-  end
+  def handle_info({port, {:data, <<?r, ?E, status::signed-32>>}}, %{port: port} = state),
+    do: {:stop, {:ep0, errno(-status)}, state}
+
+  def handle_info({port, {:data, packet}}, %{port: port} = state),
+    do: {:noreply, packet |> events() |> Enum.reduce(state, &dispatch/2)}
 
   def handle_info({port, {:exit_status, status}}, %{port: port} = state),
     do: {:stop, {:exit_status, status}, %{state | port: nil}}
 
   def handle_info({:EXIT, port, _reason}, %{port: port} = state), do: {:noreply, state}
 
-  def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
-
   def handle_info(message, state) do
     if function_exported?(state.module, :handle_info, 2),
-      do: {:noreply, reply(callback(state.module, :handle_info, [message, state.user]), state)},
+      do: {:noreply, callback(state, :handle_info, [message, state.user])},
       else: {:noreply, state}
   end
 
   @impl GenServer
-  def terminate(_reason, %{port: port}) when is_port(port), do: quit(port)
-  def terminate(_reason, _state), do: :ok
-
-  defp quit(port) do
-    Port.command(port, [?Q])
+  def terminate(_reason, %{port: port}) when is_port(port) do
+    Port.command(port, "Q")
 
     receive do
       {^port, {:exit_status, _status}} -> :ok
     after
-      @quit_ms -> Port.close(port)
+      @quit_timeout -> :ok
     end
-  rescue
-    ArgumentError -> :ok
   end
 
-  defp decode(<<?E, event::binary-size(12)>>), do: FunctionFS.events(event)
-  defp decode(<<?d, endpoint, data::binary>>), do: [{:data, endpoint, data}]
+  def terminate(_reason, _state), do: :ok
 
-  defp decode(<<?w, endpoint, result::signed-32>>) when result >= 0,
-    do: [{:written, endpoint, result}]
+  defp start(port, ep0) do
+    directions = Enum.map(ep0.directions, &if(&1 == :in, do: 1, else: 0))
 
-  defp decode(<<?w, endpoint, status::signed-32>>), do: [{:error, endpoint, errno(-status)}]
-  defp decode(<<?e, endpoint, status::signed-32>>), do: [{:error, endpoint, errno(-status)}]
-  defp decode(<<?c, data::binary>>), do: [{:control_data, data}]
-  defp decode(<<?r, ?E, status::signed-32>>), do: {:stop, {:ep0, errno(-status)}}
+    with :ok <- command(port, [?D, ep0.descriptors], :descriptors),
+         :ok <- command(port, [?S, ep0.strings], :strings) do
+      command(port, [?O, length(directions) | directions], :endpoints)
+    end
+  end
 
-  defp decode(<<?r, kind, status::signed-32>>) when kind in [?C, ?X] and status < 0,
+  defp command(port, packet, step) do
+    Port.command(port, packet)
+
+    receive do
+      {^port, {:data, <<?r, ?E, status::signed-32>>}} -> {:error, {:ep0, errno(-status)}}
+      {^port, {:data, <<?r, _kind, status::signed-32>>}} when status >= 0 -> :ok
+      {^port, {:data, <<?r, _kind, status::signed-32>>}} -> {:error, {step, errno(-status)}}
+      {^port, {:exit_status, status}} -> {:error, {:exit_status, status}}
+    after
+      @reply_timeout -> {:error, {step, :timeout}}
+    end
+  end
+
+  defp events(<<?E, event::binary-size(12)>>), do: EP0.events(event)
+  defp events(<<?d, endpoint, data::binary>>), do: [{:data, endpoint, data}]
+
+  defp events(<<?w, endpoint, bytes::signed-32>>) when bytes >= 0,
+    do: [{:written, endpoint, bytes}]
+
+  defp events(<<?w, endpoint, status::signed-32>>), do: [{:error, endpoint, errno(-status)}]
+  defp events(<<?e, endpoint, status::signed-32>>), do: [{:error, endpoint, errno(-status)}]
+  defp events(<<?c, data::binary>>), do: [{:control_data, data}]
+
+  defp events(<<?r, kind, status::signed-32>>) when kind in [?C, ?X] and status < 0,
     do: [{:control_error, errno(-status)}]
 
-  defp decode(_packet), do: []
+  defp events(<<?r, _kind, _status::signed-32>>), do: []
 
-  defp dispatch(event, state) do
-    if function_exported?(state.module, :handle_event, 2) do
-      reply(callback(state.module, :handle_event, [event, state.user]), state)
-    else
-      _ = FunctionFS.default_event(event, state.user)
-      state
-    end
-  end
+  defp dispatch(event, state), do: callback(state, :handle_event, [event, state.user])
 
-  defp reply({:noreply, user}, state), do: %{state | user: user}
-  defp reply({:failed, _reason}, state), do: state
-
-  defp reply(other, state) do
-    Logger.error("kuroneko_gadget: #{inspect(state.module)} returned #{inspect(other)}")
-    state
-  end
-
-  # A callback's exceptions and exits, logged: the function goes on.
-  defp callback(module, name, args) do
-    apply(module, name, args)
+  defp callback(state, name, args) do
+    {:noreply, user} = apply(state.module, name, args)
+    %{state | user: user}
   rescue
     exception ->
       Logger.error(
-        "kuroneko_gadget: #{inspect(module)}.#{name} failed: " <>
+        "kuroneko_gadget: #{inspect(state.module)}.#{name}/#{length(args)} failed\n" <>
           Exception.format(:error, exception, __STACKTRACE__)
       )
 
-      {:failed, {module, name, Exception.message(exception)}}
-  catch
-    kind, reason ->
-      Logger.error(
-        "kuroneko_gadget: #{inspect(module)}.#{name} failed: #{inspect({kind, reason})}"
-      )
+      state
+  end
 
-      {:failed, {module, name, {kind, reason}}}
+  defp program do
+    path = Application.app_dir(:kuroneko_gadget, ["priv", "kuroneko_ffs"])
+    if File.exists?(path), do: {:ok, path}, else: {:error, {:no_program, path}}
+  end
+
+  defp open(program, mount_point) do
+    Port.open({:spawn_executable, program}, [
+      :binary,
+      :exit_status,
+      {:packet, 4},
+      args: [mount_point]
+    ])
+  end
+
+  defp instance(dir) do
+    "ffs." <> instance = Path.basename(dir)
+    instance
+  end
+
+  defp mount_point(dir), do: "/dev/ffs-" <> instance(dir)
+
+  # Without no_disconnect, closing ep0 while the gadget is on the bus takes
+  # the whole gadget off the bus.
+  defp mount(dir) do
+    target = mount_point(dir)
+
+    if mounted?(target) do
+      :ok
+    else
+      with :ok <- File.mkdir_p(target) do
+        run("mount", ["-t", "functionfs", "-o", "no_disconnect=1", instance(dir), target])
+      end
+    end
+  end
+
+  defp unmount(dir) do
+    target = mount_point(dir)
+
+    if mounted?(target) do
+      with :ok <- run("umount", [target]), do: File.rmdir(target)
+    else
+      :ok
+    end
+  end
+
+  defp mounted?(target) do
+    case File.read("/proc/mounts") do
+      {:ok, mounts} ->
+        mounts
+        |> String.split("\n", trim: true)
+        |> Enum.any?(&match?([_source, ^target | _rest], String.split(&1, " ")))
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  defp run(command, args) do
+    case System.cmd(command, args, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, {command, status, String.trim(output)}}
+    end
   end
 
   defp errno(number), do: Map.get(@errnos, number, {:errno, number})
