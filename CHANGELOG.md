@@ -28,6 +28,11 @@ which the built-in kinds are instances of. Breaking changes:
 * Errors of configfs are `{:configfs, path, reason}`; a function's error is
   no longer wrapped with the function
 * Options are checked: unknown ones and wrong values raise in the caller
+* `subscribe/1` sends the caller the kinds of the functions each time they
+  change, and `unsubscribe/1` stops it
+* `:functions` can be `{module, function, args}`, called each time the
+  process starts: a restart by its supervisor sets up the functions saved
+  last
   (`start_link/1`, `MassStorage.insert/2`, `Input.pointer/2`...)
 * `audio/1`, `hid_device/2`, `only_gadget/1` and the `:gadget` application
   environment are gone: `instances/1`, `HID.device/1` and

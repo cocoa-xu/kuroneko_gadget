@@ -59,6 +59,60 @@ defmodule Kuroneko.GadgetTest do
              Kuroneko.Gadget.configure(pid, [{:mouse, mode: :tablet}])
   end
 
+  test "tells subscribers when the kinds of functions change", %{
+    gadget: gadget,
+    udc_class: udc_class
+  } do
+    pid =
+      start_supervised!(
+        {Kuroneko.Gadget, functions: [:keyboard], gadget: gadget, udc_class: udc_class, name: nil}
+      )
+
+    assert {:ok, [:keyboard]} = Kuroneko.Gadget.subscribe(pid)
+
+    # The message comes before the reply.
+    assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard, :microphone])
+    assert_received {Kuroneko.Gadget, {:functions, [:keyboard, :microphone]}}
+
+    assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard, {:microphone, channels: 1}])
+    refute_received {Kuroneko.Gadget, _message}
+
+    assert :ok = Kuroneko.Gadget.unsubscribe(pid)
+    assert :ok = Kuroneko.Gadget.configure(pid, [:keyboard])
+    refute_received {Kuroneko.Gadget, _message}
+  end
+
+  test "takes the functions a function returns each time it starts", %{
+    gadget: gadget,
+    udc_class: udc_class
+  } do
+    saved = start_supervised!({Agent, fn -> [:keyboard] end})
+    name = Module.concat(__MODULE__, Saved)
+
+    start_supervised!(
+      {Kuroneko.Gadget,
+       functions: {__MODULE__, :saved, [self(), saved]},
+       gadget: gadget,
+       udc_class: udc_class,
+       name: name}
+    )
+
+    assert_received :saved_read
+    assert Kuroneko.Gadget.functions(name) == [:keyboard]
+
+    # Restarted: the call waits for the start, which reads the functions.
+    Agent.update(saved, fn _functions -> [:keyboard, :mouse] end)
+    Process.exit(GenServer.whereis(name), :kill)
+    assert_receive :saved_read
+    assert Kuroneko.Gadget.functions(name) == [:keyboard, :mouse]
+  end
+
+  @doc false
+  def saved(test, agent) do
+    send(test, :saved_read)
+    Agent.get(agent, & &1)
+  end
+
   test "leaves the gadget alone when nothing changes", %{gadget: gadget, udc_class: udc_class} do
     pid = start_supervised!({Kuroneko.Gadget, gadget: gadget, udc_class: udc_class, name: nil})
     assert :ok = Kuroneko.Gadget.configure(pid, [:storage])

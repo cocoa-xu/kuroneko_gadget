@@ -74,7 +74,10 @@ defmodule Kuroneko.Gadget do
 
   ## Options
 
-    * `:functions` - the functions to have, none by default
+    * `:functions` - the functions to have, none by default. Or
+      `{module, function, args}` that returns them, called each time the
+      process starts: a restart by its supervisor then sets up those saved
+      last, a user's settings say
     * `:name` - the name to register, `Kuroneko.Gadget` by default
     * `:gadget` - the gadget's configfs directory, `default_gadget/0` by
       default
@@ -206,7 +209,7 @@ defmodule Kuroneko.Gadget do
         }
 
   @type option() ::
-          {:functions, [function_spec()]}
+          {:functions, [function_spec()] | {module(), atom(), [term()]}}
           | {:name, GenServer.name() | nil}
           | {:gadget, Path.t()}
           | {:udc_class, Path.t()}
@@ -286,6 +289,19 @@ defmodule Kuroneko.Gadget do
   """
   @spec functions(GenServer.server()) :: [kind() | module()]
   def functions(server \\ __MODULE__), do: GenServer.call(server, :functions)
+
+  @doc """
+  Sends the caller `{Kuroneko.Gadget, {:functions, kinds}}` each time the
+  kinds of the functions change, as `functions/1` gives them, until it
+  unsubscribes or exits. Returns the kinds now. The message comes before
+  the reply to the `configure/2` that changed them.
+  """
+  @spec subscribe(GenServer.server()) :: {:ok, [kind() | module()]}
+  def subscribe(server \\ __MODULE__), do: GenServer.call(server, :subscribe)
+
+  @doc "Stops the messages of `subscribe/1`."
+  @spec unsubscribe(GenServer.server()) :: :ok
+  def unsubscribe(server \\ __MODULE__), do: GenServer.call(server, :unsubscribe)
 
   @doc """
   The functions on the gadget that this process knows:
@@ -448,6 +464,7 @@ defmodule Kuroneko.Gadget do
   @impl GenServer
   def init(opts) do
     network = opts[:network]
+    functions = initial_functions(opts)
 
     state = %{
       gadget: opts[:gadget] || default_gadget(),
@@ -456,19 +473,24 @@ defmodule Kuroneko.Gadget do
       endpoints: opts[:endpoints],
       defaults: defaults(opts),
       manage_networks: opts[:manage_networks],
-      network_managed: opts[:manage_networks] or network?(opts[:functions]),
+      network_managed: opts[:manage_networks] or network?(functions),
       network: Map.new(network),
-      module_functions: %{}
+      module_functions: %{},
+      subscribers: %{},
+      kinds: []
     }
 
-    case apply_functions(state, opts[:functions]) do
-      {:ok, functions} ->
-        {:ok, %{state | module_functions: functions}}
+    state =
+      case apply_functions(state, functions) do
+        {:ok, functions} ->
+          %{state | module_functions: functions}
 
-      {:error, reason} ->
-        Logger.error("kuroneko_gadget: USB functions not set up: #{inspect(reason)}")
-        {:ok, state}
-    end
+        {:error, reason} ->
+          Logger.error("kuroneko_gadget: USB functions not set up: #{inspect(reason)}")
+          state
+      end
+
+    {:ok, %{state | kinds: kinds_now(state)}}
   end
 
   @impl GenServer
@@ -476,22 +498,25 @@ defmodule Kuroneko.Gadget do
     case apply_functions(state, specs) do
       {:ok, functions} ->
         managed = state.manage_networks or network?(specs)
-        {:reply, :ok, %{state | network_managed: managed, module_functions: functions}}
+        state = %{state | network_managed: managed, module_functions: functions}
+        {:reply, :ok, notify(state)}
 
       error ->
         {:reply, error, state}
     end
   end
 
-  def handle_call(:functions, _from, state) do
-    kinds =
-      state
-      |> present()
-      |> managed(state)
-      |> Enum.flat_map(&kinds/1)
-      |> Enum.uniq()
+  def handle_call(:functions, _from, state), do: {:reply, kinds_now(state), state}
 
-    {:reply, kinds, state}
+  def handle_call(:subscribe, {pid, _tag}, state) do
+    subscribers = Map.put_new_lazy(state.subscribers, pid, fn -> Process.monitor(pid) end)
+    {:reply, {:ok, state.kinds}, %{state | subscribers: subscribers}}
+  end
+
+  def handle_call(:unsubscribe, {pid, _tag}, state) do
+    {monitor, subscribers} = Map.pop(state.subscribers, pid)
+    if monitor, do: Process.demonitor(monitor, [:flush])
+    {:reply, :ok, %{state | subscribers: subscribers}}
   end
 
   def handle_call(:instances, _from, state),
@@ -537,6 +562,42 @@ defmodule Kuroneko.Gadget do
   def handle_info({:connect, udc, from}, state) do
     GenServer.reply(from, Configfs.write(soft_connect(state, udc), "connect"))
     {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _monitor, :process, pid, _reason}, state),
+    do: {:noreply, %{state | subscribers: Map.delete(state.subscribers, pid)}}
+
+  # Sent from the call that changed them, so before its reply.
+  defp notify(state) do
+    case kinds_now(state) do
+      kinds when kinds == state.kinds ->
+        state
+
+      kinds ->
+        for pid <- Map.keys(state.subscribers), do: send(pid, {__MODULE__, {:functions, kinds}})
+        %{state | kinds: kinds}
+    end
+  end
+
+  defp kinds_now(state) do
+    state
+    |> present()
+    |> managed(state)
+    |> Enum.flat_map(&kinds/1)
+    |> Enum.uniq()
+  end
+
+  # Functions a function returns are checked as the process starts.
+  defp initial_functions(opts) do
+    case opts[:functions] do
+      {module, function, args} ->
+        functions = apply(module, function, args)
+        check_functions!(functions, opts)
+        functions
+
+      functions ->
+        functions
+    end
   end
 
   defp check_options!(opts) do
@@ -590,13 +651,22 @@ defmodule Kuroneko.Gadget do
       network[:persist]
     )
 
-    with {:error, reason} <- normalize(opts[:functions], defaults(opts)) do
-      raise ArgumentError,
-            "invalid USB functions #{inspect(opts[:functions])}: #{inspect(reason)}"
-    end
-
+    if not mfa?(opts[:functions]), do: check_functions!(opts[:functions], opts)
     Keyword.put(opts, :network, network)
   end
+
+  defp check_functions!(functions, opts) do
+    case normalize(functions, defaults(opts)) do
+      {:ok, _instances} ->
+        :ok
+
+      {:error, reason} ->
+        raise ArgumentError, "invalid USB functions #{inspect(functions)}: #{inspect(reason)}"
+    end
+  end
+
+  defp mfa?({module, function, args}), do: is_atom(module) and is_atom(function) and is_list(args)
+  defp mfa?(_functions), do: false
 
   defp check!(true, _key, _value), do: :ok
 
