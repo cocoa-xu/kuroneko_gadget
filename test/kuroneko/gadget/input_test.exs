@@ -8,17 +8,18 @@ defmodule Kuroneko.Gadget.InputTest do
   @moduletag :tmp_dir
 
   setup %{tmp_dir: tmp_dir} do
-    [keyboard, mouse, relative] = devices = Enum.map(0..2, &Path.join(tmp_dir, "hidg#{&1}"))
-    Enum.each(devices, &File.write!(&1, ""))
+    [{keyboard, keyboard_reader}, {mouse, mouse_reader}, {relative, relative_reader}] =
+      Enum.map(0..2, &device!(Path.join(tmp_dir, "hidg#{&1}")))
+
     %{gadget: gadget, udc_class: udc_class} = FakeConfigfs.gadget(tmp_dir)
     opts = [keyboard: keyboard, mouse: mouse, relative_mouse: relative, gadget: gadget]
     pid = start_supervised!({Input, opts ++ [udc_class: udc_class, name: nil]})
 
     %{
       hid: pid,
-      keyboard: keyboard,
-      mouse: mouse,
-      relative: relative,
+      keyboard: keyboard_reader,
+      mouse: mouse_reader,
+      relative: relative_reader,
       opts: opts,
       gadget: gadget,
       udc_class: udc_class
@@ -73,10 +74,11 @@ defmodule Kuroneko.Gadget.InputTest do
              <<0, 0, 0, 0, 0, 0, 0, 0>>
            ]
 
+    # The release drops the x's left to type: the z comes right after.
     :ok = Input.type(hid, String.duplicate("x", 100))
     Input.release_all(hid)
-    Process.sleep(50)
-    assert byte_size(File.read!(keyboard)) < 8 * 20
+    :ok = Input.type(hid, "z")
+    assert length(reports_until(keyboard, 8, <<0, 0, 0x1D, 0, 0, 0, 0, 0>>)) < 20
   end
 
   test "bad input raises in the caller, and the process goes on", %{hid: hid} do
@@ -123,9 +125,8 @@ defmodule Kuroneko.Gadget.InputTest do
     dir = Kuroneko.Gadget.function_dir(:mouse, gadget: opts[:gadget])
     File.mkdir_p!(dir)
     :ok = HID.setup(dir, HID.descriptor(:touch))
-    mouse = Path.join(tmp_dir, "touch")
-    File.write!(mouse, "")
-    hid = start_supervised!({Input, Keyword.put(opts, :mouse, mouse) ++ [name: nil]}, id: :touch)
+    {touch, mouse} = device!(Path.join(tmp_dir, "touch"))
+    hid = start_supervised!({Input, Keyword.put(opts, :mouse, touch) ++ [name: nil]}, id: :touch)
 
     assert Input.pointer_mode(hid) == :touch
     # No touch, nothing to report.
@@ -172,20 +173,45 @@ defmodule Kuroneko.Gadget.InputTest do
              Input.stats(hid)
   end
 
-  # Waits for count reports of size bytes in the file.
-  defp reports(path, size, count, tries \\ 100) do
-    contents = File.read!(path)
+  # A FIFO standing in for a /dev/hidg* device, and a port that reads it:
+  # what is written comes to the test as the port's data. The reader goes
+  # with the test, even one no writer opened the FIFO for.
+  defp device!(path) do
+    {_output, 0} = System.cmd("mkfifo", [path])
 
-    cond do
-      byte_size(contents) >= size * count ->
-        for <<report::binary-size(^size) <- contents>>, do: report
+    reader =
+      Port.open({:spawn_executable, System.find_executable("cat")}, [:binary, args: [path]])
 
-      tries == 0 ->
-        flunk("#{count} reports expected in #{path}, got #{inspect(contents)}")
+    {:os_pid, os_pid} = Port.info(reader, :os_pid)
+    on_exit(fn -> System.cmd("kill", [Integer.to_string(os_pid)], stderr_to_stdout: true) end)
+    {path, reader}
+  end
 
-      true ->
-        Process.sleep(10)
-        reports(path, size, count, tries - 1)
+  # The next count reports of size bytes, as the reader gets them.
+  defp reports(reader, size, count) do
+    read(reader, size, fn reports -> length(reports) >= count end)
+  end
+
+  # The reports up to the first that is last.
+  defp reports_until(reader, size, last) do
+    reader
+    |> read(size, &(last in &1))
+    |> Enum.take_while(&(&1 != last))
+    |> Kernel.++([last])
+  end
+
+  defp read(reader, size, done?, bytes \\ <<>>) do
+    reports = for <<report::binary-size(^size) <- bytes>>, do: report
+
+    if done?.(reports) do
+      reports
+    else
+      receive do
+        {^reader, {:data, data}} -> read(reader, size, done?, bytes <> data)
+      after
+        ExUnit.configuration()[:assert_receive_timeout] ->
+          flunk("reports expected, got #{inspect(reports)}")
+      end
     end
   end
 end

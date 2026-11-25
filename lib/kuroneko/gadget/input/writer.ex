@@ -23,9 +23,9 @@ defmodule Kuroneko.Gadget.Input.Writer do
   @doc false
   # Raw files belong to the process that opens them: open here. Opening for
   # writing creates missing files, which in /dev would stand in the way of
-  # the device node: only open what is there (regular files in tests).
+  # the device node: only open what is there (files or FIFOs in tests).
   def init(path) do
-    with {:ok, %File.Stat{type: type}} when type in [:device, :regular] <- File.stat(path),
+    with {:ok, %File.Stat{type: type}} when type in [:device, :regular, :other] <- File.stat(path),
          {:ok, device} <- File.open(path, [:write, :raw, :binary]) do
       :proc_lib.init_ack({:ok, self()})
       loop(path, device)
