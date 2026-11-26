@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 (2026-11-27)
 
 The functions follow Linux's USB gadget function drivers, a module for each,
 which the built-in kinds are instances of. Breaking changes:

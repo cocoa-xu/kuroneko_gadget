@@ -1,7 +1,7 @@
 defmodule Kuroneko.Gadget.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.4.0"
   @source_url "https://github.com/cocoa-xu/kuroneko_gadget"
 
   def project do
