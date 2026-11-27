@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 (2026-11-28)
 
 * `Kuroneko.Gadget.Input` sends a device's reports to a process it starts,
   `{module, arg}` in place of the device's path, for input that goes
