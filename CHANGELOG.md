@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* `Kuroneko.Gadget.Input` sends a device's reports to a process it starts,
+  `{module, arg}` in place of the device's path, for input that goes
+  elsewhere than the gadget, such as over Bluetooth; such reports wake
+  nothing. `:pointer_mode` sets the absolute pointer's mode where no
+  gadget's `:mouse` function tells it
+
 ## v0.4.0 (2026-11-27)
 
 The functions follow Linux's USB gadget function drivers, a module for each,

@@ -40,7 +40,12 @@ defmodule Kuroneko.Gadget.Input do
 
     * `:name` - the name to register, `Kuroneko.Gadget.Input` by default
     * `:keyboard`, `:mouse`, `:relative_mouse` - device paths; by default
-      the devices of the functions of those names
+      the devices of the functions of those names. Or `{module, arg}`, for
+      input that goes elsewhere, such as over Bluetooth: a process that
+      `module.start_link(arg)` starts and links, which takes each report
+      as `{:report, report}` and does not wake the target
+    * `:pointer_mode` - the mode of the absolute pointer, by default the
+      one of the gadget's `:mouse` function
     * `:gadget` - the gadget, `Kuroneko.Gadget.default_gadget/0` by default
     * `:udc_class` - where the device controllers are, `/sys/class/udc` by
       default
@@ -100,11 +105,15 @@ defmodule Kuroneko.Gadget.Input do
           relative_mouse: device_stats()
         }
 
+  @typedoc "Where the reports of a device go: its path, or a process to start."
+  @type writer() :: Path.t() | {module(), term()}
+
   @type option() ::
           {:name, GenServer.name() | nil}
-          | {:keyboard, Path.t()}
-          | {:mouse, Path.t()}
-          | {:relative_mouse, Path.t()}
+          | {:keyboard, writer()}
+          | {:mouse, writer()}
+          | {:relative_mouse, writer()}
+          | {:pointer_mode, pointer_mode()}
           | {:gadget, Path.t()}
           | {:udc_class, Path.t()}
 
@@ -116,6 +125,7 @@ defmodule Kuroneko.Gadget.Input do
         :keyboard,
         :mouse,
         :relative_mouse,
+        :pointer_mode,
         :gadget,
         name: __MODULE__,
         udc_class: "/sys/class/udc"
@@ -202,6 +212,7 @@ defmodule Kuroneko.Gadget.Input do
       gadget: opts[:gadget],
       udc_class: opts[:udc_class],
       paths: Map.new(@kinds, &{&1, opts[&1]}),
+      pointer_mode: opts[:pointer_mode],
       writers: Map.new(@kinds, &{&1, nil}),
       sent: Map.new(@kinds, &{&1, 0}),
       dropped: Map.new(@kinds, &{&1, 0}),
@@ -460,8 +471,8 @@ defmodule Kuroneko.Gadget.Input do
 
   defp send_report(state, kind, report, opts \\ []) do
     case state.writers[kind] do
-      %{pid: writer} ->
-        state = if Keyword.get(opts, :wake, true), do: wake(state), else: state
+      %{pid: writer, wake: wakes?} ->
+        state = if wakes? and Keyword.get(opts, :wake, true), do: wake(state), else: state
         :ok = Writer.write(writer, report)
         update_in(state, [:sent, kind], &(&1 + 1))
 
@@ -497,16 +508,25 @@ defmodule Kuroneko.Gadget.Input do
           else: put_in(state, [:writers, kind], open(state, kind))
       end)
 
-    state = %{state | mode: read_pointer_mode(state)}
+    state = %{state | mode: state.pointer_mode || read_pointer_mode(state)}
     if Enum.all?(@kinds, &state.writers[&1]), do: state, else: schedule_retry(state)
   end
 
   defp open(state, kind) do
-    with {:ok, path} <- device_path(state, kind),
-         {:ok, pid} <- Writer.start_link(path) do
-      %{path: path, pid: pid}
-    else
-      {:error, _reason} -> nil
+    case state.paths[kind] do
+      {module, arg} ->
+        case module.start_link(arg) do
+          {:ok, pid} -> %{path: nil, pid: pid, wake: false}
+          _error -> nil
+        end
+
+      _path ->
+        with {:ok, path} <- device_path(state, kind),
+             {:ok, pid} <- Writer.start_link(path) do
+          %{path: path, pid: pid, wake: true}
+        else
+          {:error, _reason} -> nil
+        end
     end
   end
 

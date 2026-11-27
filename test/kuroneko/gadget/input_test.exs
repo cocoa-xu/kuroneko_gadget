@@ -157,6 +157,40 @@ defmodule Kuroneko.Gadget.InputTest do
     assert File.read!(Path.join(udc, "srp")) == "1"
   end
 
+  defmodule Forward do
+    # Takes reports as the gadget's writers do and hands them to a test.
+    def start_link({kind, test}), do: {:ok, spawn_link(fn -> loop(kind, test) end)}
+
+    defp loop(kind, test) do
+      receive do
+        {:report, report} -> send(test, {kind, report})
+      end
+
+      loop(kind, test)
+    end
+  end
+
+  test "reports go to processes in place of devices, which wake nothing", %{udc_class: udc_class} do
+    opts = [
+      keyboard: {Forward, {:keyboard, self()}},
+      mouse: {Forward, {:mouse, self()}},
+      relative_mouse: {Forward, {:relative_mouse, self()}},
+      pointer_mode: :absolute,
+      gadget: "/no/gadget",
+      udc_class: udc_class,
+      name: nil
+    ]
+
+    hid = start_supervised!({Input, opts}, id: :forwarded)
+    Input.key(hid, "KeyA", :down)
+    Input.pointer(hid, x: 1.0, y: 0.0)
+
+    assert_receive {:keyboard, <<0, 0, 0x04, 0, 0, 0, 0, 0>>}
+    assert_receive {:mouse, <<0, 32_767::little-16, 0::little-16, 0, 0>>}
+    assert Input.pointer_mode(hid) == :absolute
+    assert %{keyboard: %{device: nil, sent: 1}} = Input.stats(hid)
+  end
+
   test "without devices reports are dropped", %{tmp_dir: tmp_dir} do
     missing = Path.join(tmp_dir, "missing")
 
